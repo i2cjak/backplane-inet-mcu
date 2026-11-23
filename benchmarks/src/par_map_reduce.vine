@@ -1,0 +1,17 @@
+// Parallel divide-and-conquer map/reduce over 16 elements
+fn map_elem(i) {
+    ((i * 3) + 1) ^ 0x5A
+}
+
+fn map_reduce(lo, len) {
+    if len <= 1 {
+        map_elem(lo)
+    } else {
+        let half = len >> 1;
+        map_reduce(lo, half) + map_reduce(lo + half, len - half)
+    }
+}
+
+fn main() {
+    map_reduce(0, 16)
+}

@@ -1,0 +1,67 @@
+{
+  "name": "smoke_arith",
+  "flash_hex": "494e45540100030000004000000050000700104218000c4227000421000010002100300001001000020010000000000001004000020040000200800003001000000030000000af00010010000100d000020010000300c100030010000000100000001000190030000100100002003000020010000400300003001000110030000000a000010010000100ad00020010000200a100030010000000100000008000000020000000100001004000010010000100100000001000",
+  "psram_init": {},
+  "expected_root": 3145808,
+  "expected_reductions": 17,
+  "expected_uart_tx": [
+    33
+  ],
+  "expected_spi_tx": [],
+  "expected_i2c_tx": [],
+  "expected_value": 80,
+  "sym_table": {
+    "magic": "INET",
+    "version": 1,
+    "boot_a": 4194304,
+    "boot_b": 5242880,
+    "flash_bytes": 184,
+    "templates": {
+      "main": {
+        "ref_id": 0,
+        "word_offset": 7,
+        "byte_addr": 28,
+        "num_nodes": 4,
+        "num_wires": 4,
+        "num_redex": 4
+      },
+      "__seq_z_0": {
+        "ref_id": 1,
+        "word_offset": 24,
+        "byte_addr": 96,
+        "num_nodes": 3,
+        "num_wires": 4,
+        "num_redex": 4
+      },
+      "__seq_nz_1": {
+        "ref_id": 2,
+        "word_offset": 39,
+        "byte_addr": 156,
+        "num_nodes": 1,
+        "num_wires": 2,
+        "num_redex": 2
+      }
+    }
+  },
+  "stats": {
+    "flash_bytes": 184,
+    "num_templates": 3,
+    "reductions": 17,
+    "rule_counts": {
+      "REF": 3,
+      "OPR": 4,
+      "OP1": 4,
+      "IO": 1,
+      "SWI": 1,
+      "CON_CON": 2,
+      "ERA": 2
+    },
+    "peak_nodes": 4,
+    "peak_wires": 4,
+    "peak_active_pairs": 2,
+    "flash_bytes_read": 184,
+    "psram_node_reads": 14,
+    "psram_node_writes": 22,
+    "psram_wire_ops": 20
+  }
+}

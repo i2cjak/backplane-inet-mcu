@@ -1,0 +1,26 @@
+// Concurrent linear UART + SPI + I2C IO alongside parallel compute
+fn io_seq() {
+    uart_tx('O');
+    uart_tx('K');
+    spi_cs_low();
+    let r = spi_xfer(0xA5);
+    spi_cs_high();
+    i2c_start();
+    i2c_write(0xA0);
+    i2c_write(0x5A);
+    i2c_stop();
+    r & 0xFF
+}
+
+fn par_work(lo, len) {
+    if len <= 1 {
+        lo * 5 + 3
+    } else {
+        let half = len >> 1;
+        par_work(lo, half) + par_work(lo + half, len - half)
+    }
+}
+
+fn main() {
+    io_seq() + par_work(0, 4)
+}

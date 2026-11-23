@@ -1,0 +1,30 @@
+// Sequential 12-step 4-state branching FSM (tests scalar control-flow efficiency)
+fn step_fsm(st, acc, x) {
+    let s = st & 3;
+    if s == 0 {
+        (1, (acc + x) ^ 0x13)
+    } else {
+        if s == 1 {
+            (2, (acc << 1) + (x & 0xF))
+        } else {
+            if s == 2 {
+                (3, acc ^ (x * 3))
+            } else {
+                (0, (acc >> 1) + x + 7)
+            }
+        }
+    }
+}
+
+fn run_fsm(n, st, acc) {
+    switch n {
+        0 => acc,
+        p =>
+            let (nst, nacc) = step_fsm(st, acc, p);
+            run_fsm(p, nst, nacc)
+    }
+}
+
+fn main() {
+    run_fsm(12, 0, 1)
+}

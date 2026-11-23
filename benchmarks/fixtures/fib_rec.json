@@ -1,0 +1,89 @@
+{
+  "name": "fib_rec",
+  "flash_hex": "494e45540100060001004000000050000a008c21150004211c0080101f008c212a0080102d00985300008000000010000100100002004000030040000100800002001000000010000200c00002001000010010000000100008003000010010000000400000008000010010000000100000001000000030000000100000008000000010000100100004004000050040000100800002001000000010000200c0000200100001001000000010000100300000001000010080000000100001001000000090000200100000001000030010000100300004001000040010000500100005001000060010000000400002008000010010000300a0000000400004008000030010000500a0000600100002001000",
+  "psram_init": {},
+  "expected_root": 3145749,
+  "expected_reductions": 871,
+  "expected_uart_tx": [],
+  "expected_spi_tx": [],
+  "expected_i2c_tx": [],
+  "expected_value": 21,
+  "sym_table": {
+    "magic": "INET",
+    "version": 1,
+    "boot_a": 4194305,
+    "boot_b": 5242880,
+    "flash_bytes": 272,
+    "templates": {
+      "fib": {
+        "ref_id": 0,
+        "word_offset": 10,
+        "byte_addr": 40,
+        "num_nodes": 3,
+        "num_wires": 3,
+        "num_redex": 2
+      },
+      "main": {
+        "ref_id": 1,
+        "word_offset": 21,
+        "byte_addr": 84,
+        "num_nodes": 1,
+        "num_wires": 2,
+        "num_redex": 2
+      },
+      "__br_z_0": {
+        "ref_id": 2,
+        "word_offset": 28,
+        "byte_addr": 112,
+        "num_nodes": 0,
+        "num_wires": 1,
+        "num_redex": 1
+      },
+      "__br_nz_1": {
+        "ref_id": 3,
+        "word_offset": 31,
+        "byte_addr": 124,
+        "num_nodes": 3,
+        "num_wires": 3,
+        "num_redex": 2
+      },
+      "__br_z_2": {
+        "ref_id": 4,
+        "word_offset": 42,
+        "byte_addr": 168,
+        "num_nodes": 0,
+        "num_wires": 1,
+        "num_redex": 1
+      },
+      "__br_nz_3": {
+        "ref_id": 5,
+        "word_offset": 45,
+        "byte_addr": 180,
+        "num_nodes": 6,
+        "num_wires": 7,
+        "num_redex": 5
+      }
+    }
+  },
+  "stats": {
+    "flash_bytes": 272,
+    "num_templates": 6,
+    "reductions": 871,
+    "rule_counts": {
+      "REF": 189,
+      "CON_CON": 275,
+      "SWI": 121,
+      "ERA": 121,
+      "DUP_ATOM": 33,
+      "OPR": 66,
+      "OP1": 66
+    },
+    "peak_nodes": 101,
+    "peak_wires": 267,
+    "peak_active_pairs": 29,
+    "flash_bytes_read": 9568,
+    "psram_node_reads": 836,
+    "psram_node_writes": 1398,
+    "psram_wire_ops": 1260
+  }
+}

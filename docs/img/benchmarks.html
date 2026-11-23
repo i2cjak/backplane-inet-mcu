@@ -1,0 +1,153 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 1600px; height: 900px; overflow: hidden;
+  background: #0d0f12; color: #d9dde4;
+  font-family: "Berkeley Mono Variable", "Berkeley Mono", monospace;
+  -webkit-font-smoothing: antialiased;
+}
+.canvas {
+  width: 1600px; height: 900px;
+  padding: 56px 64px 28px 64px;
+  display: flex; flex-direction: column; justify-content: space-between;
+}
+.header { display: flex; align-items: center; justify-content: space-between; }
+.brand { display: flex; align-items: center; gap: 16px; }
+.brand-name { font-size: 30px; font-weight: 700; color: #d9dde4; letter-spacing: -0.02em; }
+.brand-sub { font-size: 18px; font-weight: 400; color: #8a93a3; margin-left: 4px; }
+.page-tag { font-size: 16px; color: #5c6473; }
+.title-block { margin-top: 22px; }
+h1 { font-size: 48px; font-weight: 700; line-height: 1.1; letter-spacing: -0.02em; color: #d9dde4; }
+.accent { color: #5fb3ff; }
+.ok { color: #58c28a; }
+.dim { color: #8a93a3; }
+.one-num { margin-top: 10px; font-size: 26px; font-weight: 700; color: #8a93a3; }
+.one-num .accent { color: #5fb3ff; }
+.one-num .ok { color: #58c28a; font-weight: 700; margin-left: 12px; }
+.footnote { font-size: 13px; color: #5c6473; display: flex; justify-content: space-between; }
+
+.panel {
+  margin-top: 26px;
+  background: #13161b; border: 1px solid #262b34; border-radius: 6px;
+  padding: 28px 32px;
+  display: flex; flex-direction: column; gap: 22px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.55);
+}
+.legend { display: flex; gap: 28px; font-size: 15px; color: #8a93a3; margin-bottom: 4px; }
+.lswatch { display: inline-block; width: 16px; height: 12px; border-radius: 2px; vertical-align: middle; margin-right: 8px; }
+.sw-b { background: #1a1e25; border: 1px solid #353c49; }
+.sw-a { background: #5fb3ff; }
+.brow { display: flex; align-items: center; gap: 24px; }
+.blabel { width: 195px; font-size: 18px; font-weight: 700; color: #d9dde4; flex-shrink: 0; }
+.btracks { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.bline { display: flex; align-items: center; gap: 14px; height: 24px; }
+.bar { height: 22px; border-radius: 3px; }
+.bar-before { background: #1a1e25; border: 1px solid #353c49; }
+.bar-after { background: #5fb3ff; }
+.bval { font-size: 18px; font-weight: 700; white-space: nowrap; }
+.bgain { font-size: 18px; font-weight: 700; white-space: nowrap; }
+</style></head>
+<body><div class="canvas">
+  <div>
+    <div class="header">
+      <div class="brand">
+        <svg width="42" height="42" xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><path fill="#e6e9de" fill-rule="evenodd" transform="translate(10.500 17.540) scale(1.0000)" d="M130.50000,32.69817L91.68666,44.82734L91.50000,44.67666L91.50000,44.88567L52.85411,56.96251L52.50000,56.67666L52.50000,57.07317L28.50000,64.57317L28.50000,169.23933L66.84865,157.25538L73.39830,162.54245L21.50000,178.76067L21.50000,59.42683L156.50000,17.23933L156.50000,53.66461L149.50000,48.01401L149.50000,26.76067L130.51921,32.69217L130.50000,32.67666ZM213.50000,179.67666L207.70652,175.00000L209.00000,175.00000L209.00000,109.00000L205.00000,109.00000L205.00000,172.81522L181.50000,153.84534L181.50000,117.32727L137.50000,81.80919L137.50000,47.32334L213.50000,108.67273ZM98.50000,59.32334L174.50000,120.67273L174.50000,191.67666L168.70652,187.00000L170.00000,187.00000L170.00000,121.00000L166.00000,121.00000L166.00000,184.81522L142.50000,165.84534L142.50000,129.32727L98.50000,93.80919ZM59.50000,71.32334L135.50000,132.67273L135.50000,203.67666L129.70652,199.00000L131.00000,199.00000L131.00000,133.00000L127.00000,133.00000L127.00000,196.81522L59.50000,142.32727Z"/></svg>
+        <span class="brand-name">Backplane</span>
+        <span class="brand-sub">backplane-inet-mcu · Verilator RTL</span>
+      </div>
+      <div class="page-tag">2/2</div>
+    </div>
+    <div class="title-block">
+      <h1>Latch-RF hot storage cuts cycles up to <span class="accent">43%</span></h1>
+      <div class="one-num">998,674 cyc → <span class="accent">655,275 cyc</span> <span class="ok">−34.4% total · 5/5 bit-exact</span></div>
+    </div>
+    <div class="panel">
+      <div class="legend">
+        <span><span class="lswatch sw-b"></span>Baseline DFF (8 hot nodes / 8 wires / 4 REF)</span>
+        <span><span class="lswatch sw-a"></span>Upgraded Latch-RF (16 hot nodes / 16 wires / 8 REF)</span>
+      </div>
+      
+    <div class="brow">
+      <div class="blabel">fib_rec</div>
+      <div class="btracks">
+        <div class="bline">
+          <div class="bar bar-before" style="width:76.00%"></div>
+          <span class="bval dim">348,129 cyc</span>
+        </div>
+        <div class="bline">
+          <div class="bar bar-after" style="width:43.25%"></div>
+          <span class="bval accent">198,094 cyc</span>
+          <span class="bgain ok">-43.1%</span>
+        </div>
+      </div>
+    </div>
+    
+    <div class="brow">
+      <div class="blabel">periph_io</div>
+      <div class="btracks">
+        <div class="bline">
+          <div class="bar bar-before" style="width:20.97%"></div>
+          <span class="bval dim">96,040 cyc</span>
+        </div>
+        <div class="bline">
+          <div class="bar bar-after" style="width:12.55%"></div>
+          <span class="bval accent">57,498 cyc</span>
+          <span class="bgain ok">-40.1%</span>
+        </div>
+      </div>
+    </div>
+    
+    <div class="brow">
+      <div class="blabel">fsm_branch</div>
+      <div class="btracks">
+        <div class="bline">
+          <div class="bar bar-before" style="width:56.14%"></div>
+          <span class="bval dim">257,147 cyc</span>
+        </div>
+        <div class="bline">
+          <div class="bar bar-after" style="width:35.05%"></div>
+          <span class="bval accent">160,550 cyc</span>
+          <span class="bgain ok">-37.6%</span>
+        </div>
+      </div>
+    </div>
+    
+    <div class="brow">
+      <div class="blabel">smoke_arith</div>
+      <div class="btracks">
+        <div class="bline">
+          <div class="bar bar-before" style="width:2.00%"></div>
+          <span class="bval dim">2,270 cyc</span>
+        </div>
+        <div class="bline">
+          <div class="bar bar-after" style="width:1.50%"></div>
+          <span class="bval accent">1,442 cyc</span>
+          <span class="bgain ok">-36.5%</span>
+        </div>
+      </div>
+    </div>
+    
+    <div class="brow">
+      <div class="blabel">par_map_reduce</div>
+      <div class="btracks">
+        <div class="bline">
+          <div class="bar bar-before" style="width:64.42%"></div>
+          <span class="bval dim">295,088 cyc</span>
+        </div>
+        <div class="bline">
+          <div class="bar bar-after" style="width:51.89%"></div>
+          <span class="bval accent">237,691 cyc</span>
+          <span class="bgain ok">-19.4%</span>
+        </div>
+      </div>
+    </div>
+    
+    </div>
+  </div>
+  <div class="footnote">
+    <span>Source: benchmarks/BENCHMARK_REPORT.md · Full-chip cocotb + Verilator · 0 leaked slots · Z3 13/13 + SMT ALU PASS</span>
+    <span>github.com/i2cjak/backplane-inet-mcu</span>
+  </div>
+</div></body></html>

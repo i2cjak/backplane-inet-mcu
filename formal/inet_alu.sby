@@ -1,0 +1,15 @@
+[options]
+mode prove
+depth 1
+
+[engines]
+smtbmc bitwuzla
+
+[script]
+read -formal inet_alu.v
+read -formal inet_alu_formal.v
+prep -top inet_alu_formal
+
+[files]
+src/inet_alu.v
+formal/inet_alu_formal.v

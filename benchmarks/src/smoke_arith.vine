@@ -1,0 +1,5 @@
+// Fast bring-up smoke test: UART TX '!' + basic arithmetic -> 80
+fn main() {
+    uart_tx('!');
+    ((17 + 25) * 2) - 4
+}

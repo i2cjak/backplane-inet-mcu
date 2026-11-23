@@ -1,0 +1,14 @@
+// Recursive binary tree Fibonacci(8) = 21
+fn fib(n) {
+    switch n {
+        0 => 0,
+        m => switch m {
+            0 => 1,
+            k => fib(k) + fib(k + 1)
+        }
+    }
+}
+
+fn main() {
+    fib(8)
+}

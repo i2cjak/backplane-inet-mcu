@@ -1,0 +1,69 @@
+# Tiny Tapeout project information
+project:
+  title:        "TT_INet_MCU: Dual-Tile Interaction-Net MCU"
+  author:       "i2cjak"
+  discord:      ""
+  description:  "Dual-tile Interaction-Net MCU with QSPI XIP Flash, Dual QSPI PSRAM, SWD, UART, SPI, and I2C"
+  language:     "Verilog"
+  clock_hz:     24000000
+
+  # How many tiles your design occupies? A single tile is about 167x108 uM.
+  tiles: "8x2"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
+
+  # Your top module name must start with "tt_um_". Make it unique by including your github username:
+  top_module:  "tt_um_inet_mcu"
+
+  # List your project's source files here.
+  # Source files must be in ./src and you must list each source file separately, one per line.
+  # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
+  source_files:
+    - "inet_latch_rf.v"
+    - "inet_alu.v"
+    - "inet_sercom.v"
+    - "inet_timer.v"
+    - "inet_ppi.v"
+    - "inet_accel.v"
+    - "inet_pio.v"
+    - "inet_gpio_xbar.v"
+    - "inet_dma.v"
+    - "inet_io_bridge.v"
+    - "inet_qspi_ctrl.v"
+    - "inet_swd.v"
+    - "inet_core.v"
+    - "tt_um_inet_mcu.v"
+
+# The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
+# This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
+pinout:
+  # Inputs
+  ui[0]: "SWCLK"
+  ui[1]: "SPI_MISO"
+  ui[2]: "BOOT_HALT"
+  ui[3]: "UART_RX"
+  ui[4]: "QSPI_LAT[0]"
+  ui[5]: "QSPI_LAT[1]"
+  ui[6]: "QSPI_PMOD_MODE"
+  ui[7]: "EXT_IRQ"
+
+  # Outputs
+  uo[0]: "QSPI_CS0_n"
+  uo[1]: "QSPI_CS1_n"
+  uo[2]: "QSPI_SCK"
+  uo[3]: "SPI_SCK"
+  uo[4]: "UART_TX"
+  uo[5]: "SPI_MOSI"
+  uo[6]: "SPI_CS_n"
+  uo[7]: "STATUS"
+
+  # Bidirectional pins (Mode 0 full MCU; ui[6]=1 remaps to mole99 QSPI Pmod)
+  uio[0]: "QSPI_IO[0]"
+  uio[1]: "QSPI_IO[1]"
+  uio[2]: "QSPI_IO[2]"
+  uio[3]: "QSPI_IO[3]"
+  uio[4]: "SWDIO"
+  uio[5]: "I2C_SCL"
+  uio[6]: "I2C_SDA"
+  uio[7]: "QSPI_CS2_n"
+
+# Do not change!
+yaml_version: 6
