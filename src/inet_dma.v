@@ -114,8 +114,9 @@ module inet_dma (
     localparam [2:0] D_NEXT     = 3'd6;
 
     reg [2:0]  state;
-    reg [19:0] desc_ptr, src_addr, dst_addr, next_ptr;
-    reg [11:0] rem_len, flags;
+    reg [13:0] desc_ptr, src_addr, dst_addr, next_ptr;
+    reg [7:0]  rem_len;
+    reg [11:0] flags;
     reg [31:0] data_buf;
     reg [1:0]  fetch_idx;
     reg        q_active;
@@ -146,15 +147,15 @@ module inet_dma (
     assign accel_wdata    = data_buf;
     assign dma_inj_b      = data_buf[23:0];
 
-    wire [19:0] addr_plus4 = ((state == D_READ) ? src_addr : dst_addr) + 20'd4;
-    wire [11:0] rem_minus1 = rem_len - 12'd1;
-    wire        last_beat  = (rem_len == 12'd1);
+    wire [13:0] addr_plus1 = ((state == D_READ) ? src_addr : dst_addr) + 14'd1;
+    wire [7:0]  rem_minus1 = rem_len - 8'd1;
+    wire        last_beat  = (rem_len == 8'd1);
 
     always @(*) begin
         case (state)
-            D_FETCH_D: qspi_cmd_addr = {4'd0, desc_ptr};
-            D_READ:    qspi_cmd_addr = {4'd0, src_addr};
-            default:   qspi_cmd_addr = {4'd0, dst_addr};
+            D_FETCH_D: qspi_cmd_addr = {8'd0, desc_ptr, 2'b00};
+            D_READ:    qspi_cmd_addr = {8'd0, src_addr, 2'b00};
+            default:   qspi_cmd_addr = {8'd0, dst_addr, 2'b00};
         endcase
     end
 
@@ -162,7 +163,7 @@ module inet_dma (
         case (req_op)
             OP_DESC_LO,
             OP_DESC_MID:   resp_data16 = {8'd0, req_data};
-            OP_DESC_HI:    resp_data16 = {12'd0, req_data[3:0]};
+            OP_DESC_HI:    resp_data16 = 16'd0;
             OP_START:      resp_data16 = {15'd0, (state != D_IDLE)};
             OP_STATUS:     resp_data16 = {6'd0, done_sticky, dma_busy, 2'd0, desc_count};
             OP_DESC_COUNT: resp_data16 = {10'd0, desc_count};
@@ -173,11 +174,11 @@ module inet_dma (
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state            <= D_IDLE;
-            desc_ptr         <= 20'd0;
-            src_addr         <= 20'd0;
-            dst_addr         <= 20'd0;
-            next_ptr         <= 20'd0;
-            rem_len          <= 12'd0;
+            desc_ptr         <= 14'd0;
+            src_addr         <= 14'd0;
+            dst_addr         <= 14'd0;
+            next_ptr         <= 14'd0;
+            rem_len          <= 8'd0;
             flags            <= 12'd0;
             data_buf         <= 32'd0;
             fetch_idx        <= 2'd0;
@@ -221,9 +222,9 @@ module inet_dma (
 
             if (req_valid) begin
                 case (req_op)
-                    OP_DESC_LO:  desc_ptr[7:0]   <= req_data;
-                    OP_DESC_MID: desc_ptr[15:8]  <= req_data;
-                    OP_DESC_HI:  desc_ptr[19:16] <= req_data[3:0];
+                    OP_DESC_LO:  desc_ptr[5:0]   <= req_data[7:2];
+                    OP_DESC_MID: desc_ptr[13:6]  <= req_data;
+                    OP_DESC_HI:  begin end
                     OP_START: begin
                         if (state == D_IDLE) begin
                             desc_count  <= 6'd0;
@@ -268,13 +269,13 @@ module inet_dma (
                     end else begin
                         if (qspi_rdata_valid) begin
                             case (fetch_idx)
-                                2'd0: src_addr <= qspi_rdata[19:0];
-                                2'd1: dst_addr <= qspi_rdata[19:0];
+                                2'd0: src_addr <= qspi_rdata[15:2];
+                                2'd1: dst_addr <= qspi_rdata[15:2];
                                 2'd2: begin
-                                    rem_len <= qspi_rdata[11:0];
+                                    rem_len <= qspi_rdata[7:0];
                                     flags   <= qspi_rdata[27:16];
                                 end
-                                2'd3: next_ptr <= qspi_rdata[19:0];
+                                2'd3: next_ptr <= qspi_rdata[15:2];
                             endcase
                             fetch_idx <= fetch_idx + 2'd1;
                         end
@@ -282,8 +283,8 @@ module inet_dma (
                             q_active   <= 1'b0;
                             parity_idx <= 1'b0;
                             pace_armed <= 1'b0;
-                            if (rem_len == 12'd0) state <= D_NEXT;
-                            else                  state <= D_PACE;
+                            if (rem_len == 8'd0) state <= D_NEXT;
+                            else                 state <= D_PACE;
                         end
                     end
                 end
@@ -310,7 +311,7 @@ module inet_dma (
                                 if (qspi_rdata_valid) data_buf <= qspi_rdata;
                                 if (!qspi_busy && !qspi_cmd_valid && !qspi_rdata_valid) begin
                                     q_active <= 1'b0;
-                                    if (src_inc) src_addr <= addr_plus4;
+                                    if (src_inc) src_addr <= addr_plus1;
                                     state <= D_WRITE;
                                 end
                             end
@@ -362,7 +363,7 @@ module inet_dma (
                                 if (qspi_wdata_valid && qspi_wdata_ready) qspi_wdata_valid <= 1'b0;
                                 if (!qspi_busy && !qspi_cmd_valid) begin
                                     q_active <= 1'b0;
-                                    if (dst_inc) dst_addr <= addr_plus4;
+                                    if (dst_inc) dst_addr <= addr_plus1;
                                     rem_len <= rem_minus1;
                                     state   <= last_beat ? D_NEXT : D_PACE;
                                 end
@@ -427,7 +428,7 @@ module inet_dma (
                 D_NEXT: begin
                     desc_count    <= desc_count + 6'd1;
                     evt_desc_done <= 1'b1;
-                    if (chain_en && (next_ptr != 20'd0)) begin
+                    if (chain_en && (next_ptr != 14'd0)) begin
                         desc_ptr  <= next_ptr;
                         fetch_idx <= 2'd0;
                         state     <= D_FETCH_D;

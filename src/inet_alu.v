@@ -31,24 +31,40 @@ module inet_alu (
     localparam [3:0] ALU_SEQ  = 4'hE;
     localparam [3:0] ALU_PACK = 4'hF;
 
-    wire [3:0]  sh   = b[3:0];
-    wire [15:0] prod = a * b;
+    function [15:0] bitrev16;
+        input [15:0] v;
+        integer k;
+        begin
+            for (k = 0; k < 16; k = k + 1) bitrev16[k] = v[15 - k];
+        end
+    endfunction
+
+    wire [3:0]        sh        = b[3:0];
+    wire [15:0]       prod      = a * b;
+    wire [16:0]       sub17     = {1'b0, a} - {1'b0, b};
+    wire [15:0]       sh_in     = (op == ALU_SHL) ? bitrev16(a) : a;
+    wire              sh_fill   = (op == ALU_SAR) ? a[15] : 1'b0;
+    wire signed [16:0] sh_res17 = $signed({sh_fill, sh_in}) >>> sh;
+    wire [15:0]       sh_out    = sh_res17[15:0];
+    wire              _unused_s = sh_res17[16];
+    wire              eq_flag   = (sub17[15:0] == 16'd0);
+    wire              lts_flag  = (a[15] != b[15]) ? a[15] : sub17[15];
 
     always @(*) begin
         case (op)
             ALU_ADD:  res = a + b;
-            ALU_SUB:  res = a - b;
+            ALU_SUB:  res = sub17[15:0];
             ALU_AND:  res = a & b;
             ALU_OR:   res = a | b;
             ALU_XOR:  res = a ^ b;
-            ALU_SHL:  res = a << sh;
-            ALU_SHR:  res = a >> sh;
-            ALU_SAR:  res = $unsigned($signed(a) >>> sh);
-            ALU_EQ:   res = {15'd0, (a == b)};
-            ALU_NE:   res = {15'd0, (a != b)};
-            ALU_LTU:  res = {15'd0, (a < b)};
-            ALU_LTS:  res = {15'd0, ($signed(a) < $signed(b))};
-            ALU_LEU:  res = {15'd0, (a <= b)};
+            ALU_SHL:  res = bitrev16(sh_out);
+            ALU_SHR,
+            ALU_SAR:  res = sh_out;
+            ALU_EQ:   res = {15'd0, eq_flag};
+            ALU_NE:   res = {15'd0, !eq_flag};
+            ALU_LTU:  res = {15'd0, sub17[16]};
+            ALU_LTS:  res = {15'd0, lts_flag};
+            ALU_LEU:  res = {15'd0, sub17[16] || eq_flag};
             ALU_MUL:  res = prod;
             ALU_SEQ:  res = b;
             ALU_PACK: res = {a[7:0], b[7:0]};

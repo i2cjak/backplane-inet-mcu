@@ -16,9 +16,9 @@
 `default_nettype none
 
 module inet_core #(
-    parameter integer HOT_NODES       = 16,
-    parameter integer HOT_WIRES       = 16,
-    parameter integer REF_DIR_ENTRIES = 8,
+    parameter integer HOT_NODES       = 1,
+    parameter integer HOT_WIRES       = 1,
+    parameter integer REF_DIR_ENTRIES = 0,
     parameter integer N_TILES         = 2
 ) (
     input  wire        clk,
@@ -29,7 +29,7 @@ module inet_core #(
     input  wire        qspi_cmd_ready,
     output reg  [1:0]  qspi_cmd_dev,    // 0=Flash CS0, 1=PSRAM A CS1, 2=PSRAM B CS2
     output reg         qspi_cmd_write,  // 0=read, 1=write
-    output reg  [23:0] qspi_cmd_addr,
+    output wire [23:0] qspi_cmd_addr,
     output reg  [4:0]  qspi_cmd_words,  // words - 1
     output reg  [31:0] qspi_wdata,
     output reg         qspi_wdata_valid,
@@ -60,9 +60,9 @@ module inet_core #(
     // SWD Region 0x7 MMIO bridge
     output reg         dbg_mmio_valid,
     input  wire        dbg_mmio_ready,
-    output reg  [3:0]  dbg_mmio_dev,
-    output reg  [3:0]  dbg_mmio_op,
-    output reg  [7:0]  dbg_mmio_wdata,
+    output wire [3:0]  dbg_mmio_dev,
+    output wire [3:0]  dbg_mmio_op,
+    output wire [7:0]  dbg_mmio_wdata,
     input  wire [15:0] dbg_mmio_rdata,
 
     // SWD debug control, telemetry, and memory access
@@ -83,18 +83,10 @@ module inet_core #(
     input  wire [23:0] dbg_mem_addr,
     input  wire [31:0] dbg_mem_wdata,
     output reg         dbg_mem_ready,
-    output reg  [31:0] dbg_mem_rdata
+    output wire [31:0] dbg_mem_rdata
 );
 
-    localparam integer HN_AW       = (HOT_NODES <= 8) ? 3 : (HOT_NODES <= 16) ? 4 : (HOT_NODES <= 32) ? 5 : 6;
-    localparam integer HW_AW       = (HOT_WIRES <= 8) ? 3 : (HOT_WIRES <= 16) ? 4 : (HOT_WIRES <= 32) ? 5 : 6;
-    localparam integer RD_AW       = (REF_DIR_ENTRIES <= 4) ? 2 : (REF_DIR_ENTRIES <= 8) ? 3 : 4;
-    localparam integer RD_TAG_W    = 8 - RD_AW;
-    localparam integer DQ_RF_DEPTH = (N_TILES <= 2) ? 8 : 16;
-    localparam integer DQ_AW       = (N_TILES <= 2) ? 3 : 4;
     localparam integer TILE_W      = (N_TILES <= 2) ? 1 : 2;
-    localparam integer RMAP_IW     = (HOT_NODES > 16 || HOT_WIRES > 16) ? 5 : 4;
-    localparam integer RMAP_W      = 2 * (RMAP_IW + 1);
 
     // ------------------------------------------------------------------------
     // ISA Constants (synced with spec/isa.py)
@@ -115,8 +107,8 @@ module inet_core #(
     localparam [31:0] FLASH_MAGIC  = 32'h54454E49; // "INET"
     localparam [15:0] HOT_NODES_16 = HOT_NODES[15:0];
     localparam [15:0] HOT_WIRES_16 = HOT_WIRES[15:0];
-    localparam [14:0] HOT_NODES_15 = HOT_NODES[14:0];
-    localparam [14:0] HOT_WIRES_15 = HOT_WIRES[14:0];
+    localparam [11:0] HOT_NODES_12 = HOT_NODES[11:0];
+    localparam [11:0] HOT_WIRES_12 = HOT_WIRES[11:0];
 
     function [23:0] mk_port;
         input [3:0]  tag;
@@ -127,228 +119,64 @@ module inet_core #(
         end
     endfunction
 
-    function [HN_AW:0] find_free_hn;
-        input [HOT_NODES-1:0] used_mask;
-        integer k;
-        reg found;
-        reg [HN_AW-1:0] idx;
-        begin
-            found = 1'b0;
-            idx   = {HN_AW{1'b0}};
-            for (k = 0; k < HOT_NODES; k = k + 1) begin
-                if (!found && !used_mask[k]) begin
-                    found = 1'b1;
-                    idx   = k[HN_AW-1:0];
-                end
-            end
-            find_free_hn = {found, idx};
-        end
-    endfunction
+    // ------------------------------------------------------------------------
+    // Scalar Hot Node & Wire Arenas (HOT_NODES=1, HOT_WIRES=1)
+    // ------------------------------------------------------------------------
+    reg        hot_node_used;
+    reg        hot_wire_used;
 
-    function [HW_AW:0] find_free_hw;
-        input [HOT_WIRES-1:0] used_mask;
-        integer k;
-        reg found;
-        reg [HW_AW-1:0] idx;
-        begin
-            found = 1'b0;
-            idx   = {HW_AW{1'b0}};
-            for (k = 0; k < HOT_WIRES; k = k + 1) begin
-                if (!found && !used_mask[k]) begin
-                    found = 1'b1;
-                    idx   = k[HW_AW-1:0];
-                end
-            end
-            find_free_hw = {found, idx};
-        end
-    endfunction
+    reg [47:0] hn_slot;
+    wire [23:0] hn_rd_a0 = hn_slot[23:0];
+    wire [23:0] hn_rd_a1 = hn_slot[47:24];
 
-    function [7:0] popcount_hn;
-        input [HOT_NODES-1:0] m;
-        integer k;
-        reg [7:0] c;
-        begin
-            c = 8'd0;
-            for (k = 0; k < HOT_NODES; k = k + 1) c = c + {7'd0, m[k]};
-            popcount_hn = c;
-        end
-    endfunction
-
-    function [7:0] popcount_hw;
-        input [HOT_WIRES-1:0] m;
-        integer k;
-        reg [7:0] c;
-        begin
-            c = 8'd0;
-            for (k = 0; k < HOT_WIRES; k = k + 1) c = c + {7'd0, m[k]};
-            popcount_hw = c;
-        end
-    endfunction
+    reg [23:0] hw_slot;
+    wire [23:0] hw_rd_data = hw_slot;
 
     // ------------------------------------------------------------------------
-    // Latch-RF Hot Node & Wire Arenas + Shared Write-Data Bus
-    // ------------------------------------------------------------------------
-    reg [HOT_NODES-1:0] hot_node_used;
-    reg [HOT_WIRES-1:0] hot_wire_used;
-    reg [47:0]          rf_wdata;
-
-    reg              hn_wr_en;
-    reg [HN_AW-1:0]  hn_wr_addr, hn_rd_addr;
-    wire [47:0]      hn_rd_data;
-
-    inet_latch_rf #(
-        .DEPTH    (HOT_NODES),
-        .WIDTH    (48),
-        .ADDR_W   (HN_AW),
-        .BYPASS   (1),
-        .REG_INPUT(0)
-    ) u_hot_nodes (
-        .clk  (clk),
-        .rst_n(rst_n),
-        .we   (hn_wr_en),
-        .waddr(hn_wr_addr),
-        .wdata(rf_wdata),
-        .raddr(hn_rd_addr),
-        .rdata(hn_rd_data)
-    );
-    wire [23:0] hn_rd_a0 = hn_rd_data[23:0];
-    wire [23:0] hn_rd_a1 = hn_rd_data[47:24];
-
-    reg              hw_wr_en;
-    reg [HW_AW-1:0]  hw_wr_addr, hw_rd_addr;
-    wire [23:0]      hw_rd_data;
-
-    inet_latch_rf #(
-        .DEPTH    (HOT_WIRES),
-        .WIDTH    (24),
-        .ADDR_W   (HW_AW),
-        .BYPASS   (1),
-        .REG_INPUT(0)
-    ) u_hot_wires (
-        .clk  (clk),
-        .rst_n(rst_n),
-        .we   (hw_wr_en),
-        .waddr(hw_wr_addr),
-        .wdata(rf_wdata[23:0]),
-        .raddr(hw_rd_addr),
-        .rdata(hw_rd_data)
-    );
-
-    wire [HN_AW:0] free_hot_n = find_free_hn(hot_node_used);
-    wire [HW_AW:0] free_hot_w = find_free_hw(hot_wire_used);
-
-    // ------------------------------------------------------------------------
-    // Roots, Status, PSRAM Allocators, Spill Stack, Latch-RF REF Dir & Map
+    // Roots, Status, PSRAM Allocators, Spill Stack
     // ------------------------------------------------------------------------
     reg [23:0] roots [0:1];
     reg        booted;
     reg        err_boot;
     reg        err_linear;
     reg        err_type;
-    reg [15:0] hot_hit_cnt;
-    reg [15:0] psram_spill_cnt;
+    reg [9:0]  hot_hit_cnt;
+    reg [9:0]  psram_spill_cnt;
     reg [3:0]  io_inflight_cnt;
-    reg [23:0] cycle_cnt_r;
-    reg [19:0] redex_cnt_r;
-    reg [19:0] qspi_txn_cnt_r;
+    reg [19:0] cycle_cnt_r;
+    reg [13:0] redex_cnt_r;
+    reg [13:0] qspi_txn_cnt_r;
 
-    assign cycle_cnt    = {8'd0, cycle_cnt_r};
-    assign redex_cnt    = {12'd0, redex_cnt_r};
-    assign qspi_txn_cnt = {12'd0, qspi_txn_cnt_r};
+    assign cycle_cnt    = {12'd0, cycle_cnt_r};
+    assign redex_cnt    = {18'd0, redex_cnt_r};
+    assign qspi_txn_cnt = {18'd0, qspi_txn_cnt_r};
 
-    reg [14:0] psram_next_node;
-    reg [14:0] psram_next_wire;
+    reg [11:0] psram_next_node;
+    reg [11:0] psram_next_wire;
 
-    reg [11:0] spill_cnt; // Lazy LIFO PSRAM B stack depth
+    reg [9:0]  spill_cnt; // Lazy LIFO PSRAM B stack depth
 
-    // REF directory cache ({tag[RD_TAG_W-1:0], dir[31:0]})
-    reg [REF_DIR_ENTRIES-1:0] ref_cache_valid;
-    reg                       rd_cache_we;
-    reg [RD_AW-1:0]           rd_cache_waddr, rd_cache_raddr;
-    wire [RD_TAG_W+31:0]      rd_cache_rdata;
+    reg [17:0] qspi_cmd_waddr;
+    assign qspi_cmd_addr = {4'd0, qspi_cmd_waddr, 2'b00};
 
-    inet_latch_rf #(
-        .DEPTH    (REF_DIR_ENTRIES),
-        .WIDTH    (RD_TAG_W + 32),
-        .ADDR_W   (RD_AW),
-        .BYPASS   (0),
-        .REG_INPUT(0)
-    ) u_ref_dir (
-        .clk  (clk),
-        .rst_n(rst_n),
-        .we   (rd_cache_we),
-        .waddr(rd_cache_waddr),
-        .wdata(rf_wdata[RD_TAG_W+31:0]),
-        .raddr(rd_cache_raddr),
-        .rdata(rd_cache_rdata)
-    );
-
-    // 16-entry Latch-RF REF per-node/per-wire relocation map
-    reg               rmap_we;
-    reg [3:0]         rmap_waddr, rmap_raddr;
-    reg [RMAP_W-1:0]  rmap_wdata;
-    wire [RMAP_W-1:0] rmap_rdata;
-
-    inet_latch_rf #(
-        .DEPTH    (16),
-        .WIDTH    (RMAP_W),
-        .ADDR_W   (4),
-        .BYPASS   (0),
-        .REG_INPUT(0)
-    ) u_ref_map (
-        .clk  (clk),
-        .rst_n(rst_n),
-        .we   (rmap_we),
-        .waddr(rmap_waddr),
-        .wdata(rmap_wdata),
-        .raddr(rmap_raddr),
-        .rdata(rmap_rdata)
-    );
+    wire _unused_ref_dir = (REF_DIR_ENTRIES > 0) || dbg_mem_addr[0] || (|qspi_rdata[17:14]);
 
     // ------------------------------------------------------------------------
-    // Parameterized Multi-Tile Chase-Lev Work-Stealing Deques (Latch RF)
+    // Parameterized Multi-Tile Chase-Lev Work-Stealing Deques (DFF, 1 entry/tile)
     // ------------------------------------------------------------------------
-    reg [1:0]  dq_head [0:N_TILES-1];
-    reg [1:0]  dq_tail [0:N_TILES-1];
-    reg [2:0]  dq_cnt  [0:N_TILES-1];
+    reg [47:0]        dq_mem [0:N_TILES-1];
+    reg [N_TILES-1:0] dq_valid;
+    reg [TILE_W-1:0]  dq_rd_addr;
+    wire [47:0]       dq_rd_data = dq_mem[dq_rd_addr];
 
-    reg              dq_wr_en;
-    reg [DQ_AW-1:0]  dq_wr_addr, dq_rd_addr;
-    wire [47:0]      dq_rd_data;
-
-    inet_latch_rf #(
-        .DEPTH    (DQ_RF_DEPTH),
-        .WIDTH    (48),
-        .ADDR_W   (DQ_AW),
-        .BYPASS   (1),
-        .REG_INPUT(0)
-    ) u_dq_rf (
-        .clk  (clk),
-        .rst_n(rst_n),
-        .we   (dq_wr_en),
-        .waddr(dq_wr_addr),
-        .wdata(rf_wdata),
-        .raddr(dq_rd_addr),
-        .rdata(dq_rd_data)
-    );
-
-    reg [4:0] total_dq_cnt;
-    reg       all_dq_full;
-    reg       any_dq_nonempty;
-    reg [3:0] tile_active_vec;
+    wire       all_dq_full     = &dq_valid;
+    wire       any_dq_nonempty = |dq_valid;
+    reg [3:0]  tile_active_vec;
     integer ti;
     always @(*) begin
-        total_dq_cnt    = 5'd0;
-        all_dq_full     = 1'b1;
-        any_dq_nonempty = 1'b0;
         tile_active_vec = 4'd0;
         for (ti = 0; ti < N_TILES; ti = ti + 1) begin
-            total_dq_cnt    = total_dq_cnt + {2'd0, dq_cnt[ti]};
-            if (dq_cnt[ti] < 3'd4) all_dq_full = 1'b0;
-            if (dq_cnt[ti] != 3'd0) begin
-                any_dq_nonempty     = 1'b1;
-                tile_active_vec[ti] = 1'b1;
-            end
+            tile_active_vec[ti] = dq_valid[ti];
         end
     end
 
@@ -368,7 +196,6 @@ module inet_core #(
     localparam [4:0] S_LINK_RD     = 5'd10;
     localparam [4:0] S_LINK_WR     = 5'd11;
     localparam [4:0] S_REF_DIR     = 5'd12;
-    localparam [4:0] S_REF_ALLOC   = 5'd13;
     localparam [4:0] S_REF_ROOT    = 5'd14;
     localparam [4:0] S_REF_NODE_RD = 5'd15;
     localparam [4:0] S_REF_NODE_WR = 5'd16;
@@ -413,31 +240,34 @@ module inet_core #(
     reg [23:0] cur_la, cur_lb;
     reg        chain_active;
     reg [2:0]  lnk_idx, lnk_cnt;
-    reg [14:0] cur_wid;
+    reg [11:0] cur_wid;
 
-    reg [14:0] alloc_n [0:3];
-    reg [14:0] alloc_w [0:3];
-    reg [4:0]  alloc_step;
+    reg [11:0] alloc_n [0:3];
+    reg [11:0] alloc_w [0:3];
+    reg [2:0]  alloc_step;
     reg [2:0]  alloc_need_n, alloc_need_w;
     reg [2:0]  wr_step, wr_total;
     reg        wr_phase;
 
-    reg [15:0] exp_ref_id;
+    reg [7:0]  exp_ref_id;
     // Note: exp_other reuses pa, exp_root reuses pb across S_RD_A -> S_REF_* -> S_LINK
-    reg [17:0] exp_woff;
-    reg [4:0]  exp_nnodes, exp_nwires;
+    reg [13:0] exp_woff;
+    reg [4:0]  exp_nnodes;
     reg [3:0]  exp_nredex;
-    reg [14:0] exp_base_nid, exp_base_wid;
+    reg [11:0] exp_base_nid, exp_base_wid;
     reg [4:0]  exp_node_idx;
     reg [3:0]  exp_redex_idx;
     reg [2:0]  exp_phase;
-    reg        exp_use_map, exp_all_nodes_hot;
-    reg [4:0]  exp_cold_ncnt, exp_cold_wcnt;
-    reg [RMAP_IW:0] cur_dst_nmap;
 
     assign io_req_dev  = pb[19:16];
     assign io_req_val  = pa[15:0];
     assign io_req_cont = buf_b0;
+
+    assign dbg_mmio_dev   = dbg_mem_addr[11:8];
+    assign dbg_mmio_op    = dbg_mem_addr[5:2];
+    assign dbg_mmio_wdata = dbg_mem_we ? dbg_mem_wdata[7:0] : 8'd0;
+    // buf_a0/buf_a1[7:0] are idle in S_IDLE/S_DBG_QSPI/S_DBG_MMIO and hold dbg_mem_rdata
+    assign dbg_mem_rdata  = {buf_a1[7:0], buf_a0};
 
     // dbg_inj_a reuses pa across Region 0x3 2-word write
     reg        dbg_pending;
@@ -452,7 +282,7 @@ module inet_core #(
     assign core_busy = !booted ||
                        (state != S_IDLE) ||
                        any_dq_nonempty ||
-                       (spill_cnt != 12'd0) ||
+                       (spill_cnt != 10'd0) ||
                        (io_inflight_cnt != 4'd0) || io_busy || io_out_valid;
 
     assign active_tiles = {
@@ -464,55 +294,43 @@ module inet_core #(
 
     assign queue_depths = {
         spill_cnt,
-        4'd0,
-        5'd0, dq_cnt[1],
-        5'd0, dq_cnt[0]
+        6'd0,
+        7'd0, dq_valid[1],
+        7'd0, dq_valid[0]
     };
 
-    // Combinational port relocator (per-node/wire latch map or contiguous PSRAM A)
-    function [23:0] reloc_port_mapped;
-        input [23:0]       p;
-        input              use_map;
-        input [RMAP_W-1:0] map_e;
-        input [14:0]       nbase;
-        input [14:0]       wbase;
-        reg [14:0] nid_out, wid_out;
+    // Combinational port relocator (shared 12-bit base adder)
+    function [23:0] reloc_port;
+        input [23:0] p;
+        input [11:0] nbase;
+        input [11:0] wbase;
+        reg   [11:0] sum_id;
         begin
-            if (p[23]) begin
-                if (use_map) nid_out = map_e[RMAP_IW] ? {{(15-RMAP_IW){1'b0}}, map_e[RMAP_IW-1:0]}
-                                                      : (nbase + {{(15-RMAP_IW){1'b0}}, map_e[RMAP_IW-1:0]});
-                else         nid_out = p[14:0] + nbase;
-                reloc_port_mapped = {p[23:16], 1'b0, nid_out};
-            end else if (p[23:20] == TAG_VAR) begin
-                if (use_map) wid_out = map_e[RMAP_W-1] ? {{(15-RMAP_IW){1'b0}}, map_e[RMAP_IW+1 +: RMAP_IW]}
-                                                       : (wbase + {{(15-RMAP_IW){1'b0}}, map_e[RMAP_IW+1 +: RMAP_IW]});
-                else         wid_out = p[14:0] + wbase;
-                reloc_port_mapped = {p[23:16], 1'b0, wid_out};
-            end else begin
-                reloc_port_mapped = p;
-            end
+            sum_id = p[11:0] + (p[23] ? nbase : wbase);
+            if (p[23] || p[23:20] == TAG_VAR) reloc_port = {p[23:16], 4'd0, sum_id};
+            else                              reloc_port = p;
         end
     endfunction
 
-    wire [23:0] reloc_qspi_port = reloc_port_mapped(qspi_rdata[23:0], exp_use_map, rmap_rdata, exp_base_nid, exp_base_wid);
+    wire [23:0] reloc_qspi_port = reloc_port(qspi_rdata[23:0], exp_base_nid, exp_base_wid);
 
     // ------------------------------------------------------------------------
     // Combinational Writeback & Link Generators
     // ------------------------------------------------------------------------
-    reg [14:0] wr_nid;
+    reg [11:0] wr_nid;
     reg [23:0] wr_a0, wr_a1;
     always @(*) begin
-        wr_nid = 15'd0;
+        wr_nid = 12'd0;
         wr_a0  = 24'd0;
         wr_a1  = 24'd0;
         case (kind)
             K_OPR: begin
-                wr_nid = pb[14:0];
+                wr_nid = pb[11:0];
                 wr_a0  = pa;
                 wr_a1  = buf_b1;
             end
             K_SWI_Z: begin
-                wr_nid = pb[14:0];
+                wr_nid = pb[11:0];
                 wr_a0  = buf_b1;
                 wr_a1  = mk_port(TAG_ERA, 4'd0, 16'd0);
             end
@@ -524,24 +342,24 @@ module inet_core #(
                     wr_a0  = mk_port(TAG_NUM, 4'd0, arg);
                     wr_a1  = buf_b1;
                 end else begin
-                    wr_nid = pb[14:0];
+                    wr_nid = pb[11:0];
                     wr_a0  = mk_port(TAG_ERA, 4'd0, 16'd0);
-                    wr_a1  = mk_port(TAG_CON, 4'd0, {1'b0, alloc_n[0]});
+                    wr_a1  = mk_port(TAG_CON, 4'd0, {4'd0, alloc_n[0]});
                 end
             end
             K_DUP_OP1: begin
                 case (wr_step[1:0])
-                    2'd0: begin wr_nid = alloc_n[0]; wr_a0 = buf_b0; wr_a1 = mk_port(TAG_VAR, 4'd0, {1'b0, alloc_w[0]}); end
-                    2'd1: begin wr_nid = alloc_n[1]; wr_a0 = buf_b0; wr_a1 = mk_port(TAG_VAR, 4'd0, {1'b0, alloc_w[1]}); end
-                    default: begin wr_nid = alloc_n[2]; wr_a0 = mk_port(TAG_VAR, 4'd0, {1'b0, alloc_w[0]}); wr_a1 = mk_port(TAG_VAR, 4'd0, {1'b0, alloc_w[1]}); end
+                    2'd0: begin wr_nid = alloc_n[0]; wr_a0 = buf_b0; wr_a1 = mk_port(TAG_VAR, 4'd0, {4'd0, alloc_w[0]}); end
+                    2'd1: begin wr_nid = alloc_n[1]; wr_a0 = buf_b0; wr_a1 = mk_port(TAG_VAR, 4'd0, {4'd0, alloc_w[1]}); end
+                    default: begin wr_nid = alloc_n[2]; wr_a0 = mk_port(TAG_VAR, 4'd0, {4'd0, alloc_w[0]}); wr_a1 = mk_port(TAG_VAR, 4'd0, {4'd0, alloc_w[1]}); end
                 endcase
             end
             K_DUP_COMM: begin
                 case (wr_step[1:0])
-                    2'd0: begin wr_nid = alloc_n[0]; wr_a0 = mk_port(TAG_VAR, 4'd0, {1'b0, alloc_w[0]}); wr_a1 = mk_port(TAG_VAR, 4'd0, {1'b0, alloc_w[2]}); end
-                    2'd1: begin wr_nid = alloc_n[1]; wr_a0 = mk_port(TAG_VAR, 4'd0, {1'b0, alloc_w[1]}); wr_a1 = mk_port(TAG_VAR, 4'd0, {1'b0, alloc_w[3]}); end
-                    2'd2: begin wr_nid = alloc_n[2]; wr_a0 = mk_port(TAG_VAR, 4'd0, {1'b0, alloc_w[0]}); wr_a1 = mk_port(TAG_VAR, 4'd0, {1'b0, alloc_w[1]}); end
-                    default: begin wr_nid = alloc_n[3]; wr_a0 = mk_port(TAG_VAR, 4'd0, {1'b0, alloc_w[2]}); wr_a1 = mk_port(TAG_VAR, 4'd0, {1'b0, alloc_w[3]}); end
+                    2'd0: begin wr_nid = alloc_n[0]; wr_a0 = mk_port(TAG_VAR, 4'd0, {4'd0, alloc_w[0]}); wr_a1 = mk_port(TAG_VAR, 4'd0, {4'd0, alloc_w[2]}); end
+                    2'd1: begin wr_nid = alloc_n[1]; wr_a0 = mk_port(TAG_VAR, 4'd0, {4'd0, alloc_w[1]}); wr_a1 = mk_port(TAG_VAR, 4'd0, {4'd0, alloc_w[3]}); end
+                    2'd2: begin wr_nid = alloc_n[2]; wr_a0 = mk_port(TAG_VAR, 4'd0, {4'd0, alloc_w[0]}); wr_a1 = mk_port(TAG_VAR, 4'd0, {4'd0, alloc_w[1]}); end
+                    default: begin wr_nid = alloc_n[3]; wr_a0 = mk_port(TAG_VAR, 4'd0, {4'd0, alloc_w[2]}); wr_a1 = mk_port(TAG_VAR, 4'd0, {4'd0, alloc_w[3]}); end
                 endcase
             end
             default: begin end
@@ -563,17 +381,17 @@ module inet_core #(
             K_PAIR2:  begin gen_la = (lnk_idx == 3'd0) ? buf_a0 : buf_a1; gen_lb = (lnk_idx == 3'd0) ? buf_b0 : buf_b1; end
             K_DUP_OP1: begin
                 case (lnk_idx[1:0])
-                    2'd0: begin gen_la = buf_a0; gen_lb = mk_port(TAG_OP1, pb[19:16], {1'b0, alloc_n[0]}); end
-                    2'd1: begin gen_la = buf_a1; gen_lb = mk_port(TAG_OP1, pb[19:16], {1'b0, alloc_n[1]}); end
-                    default: begin gen_la = buf_b1; gen_lb = mk_port(TAG_DUP, pa[19:16], {1'b0, alloc_n[2]}); end
+                    2'd0: begin gen_la = buf_a0; gen_lb = mk_port(TAG_OP1, pb[19:16], {4'd0, alloc_n[0]}); end
+                    2'd1: begin gen_la = buf_a1; gen_lb = mk_port(TAG_OP1, pb[19:16], {4'd0, alloc_n[1]}); end
+                    default: begin gen_la = buf_b1; gen_lb = mk_port(TAG_DUP, pa[19:16], {4'd0, alloc_n[2]}); end
                 endcase
             end
             K_DUP_COMM: begin
                 case (lnk_idx[1:0])
-                    2'd0: begin gen_la = buf_a0; gen_lb = mk_port(pb[23:20], pb[19:16], {1'b0, alloc_n[0]}); end
-                    2'd1: begin gen_la = buf_a1; gen_lb = mk_port(pb[23:20], pb[19:16], {1'b0, alloc_n[1]}); end
-                    2'd2: begin gen_la = buf_b0; gen_lb = mk_port(TAG_DUP, pa[19:16], {1'b0, alloc_n[2]}); end
-                    default: begin gen_la = buf_b1; gen_lb = mk_port(TAG_DUP, pa[19:16], {1'b0, alloc_n[3]}); end
+                    2'd0: begin gen_la = buf_a0; gen_lb = mk_port(pb[23:20], pb[19:16], {4'd0, alloc_n[0]}); end
+                    2'd1: begin gen_la = buf_a1; gen_lb = mk_port(pb[23:20], pb[19:16], {4'd0, alloc_n[1]}); end
+                    2'd2: begin gen_la = buf_b0; gen_lb = mk_port(TAG_DUP, pa[19:16], {4'd0, alloc_n[2]}); end
+                    default: begin gen_la = buf_b1; gen_lb = mk_port(TAG_DUP, pa[19:16], {4'd0, alloc_n[3]}); end
                 endcase
             end
             K_OPR: begin gen_la = buf_b0; gen_lb = mk_port(TAG_OP1, pb[19:16], pb[15:0]); end
@@ -596,7 +414,7 @@ module inet_core #(
         dq_pick_steal = 1'b0;
         cand          = {TILE_W{1'b0}};
         sum_t         = 3'd0;
-        if (dq_cnt[cur_tile] != 3'd0) begin
+        if (dq_valid[cur_tile]) begin
             dq_pick_found = 1'b1;
             dq_pick_tile  = cur_tile;
             dq_pick_steal = 1'b0;
@@ -604,7 +422,7 @@ module inet_core #(
             for (k = 1; k < N_TILES; k = k + 1) begin
                 sum_t = {{(3-TILE_W){1'b0}}, cur_tile} + k[2:0];
                 cand  = (sum_t >= N_TILES[2:0]) ? (sum_t[TILE_W-1:0] - N_TILES[TILE_W-1:0]) : sum_t[TILE_W-1:0];
-                if (!dq_pick_found && dq_cnt[cand] != 3'd0) begin
+                if (!dq_pick_found && dq_valid[cand]) begin
                     dq_pick_found = 1'b1;
                     dq_pick_tile  = cand;
                     dq_pick_steal = 1'b1;
@@ -625,41 +443,14 @@ module inet_core #(
         endcase
     end
 
-    // Read-port address muxes for latch RFs
+    // Read-port address mux for deque DFFs
     always @(*) begin : rf_raddr_mux
-        reg [1:0] slot;
-        slot           = 2'd0;
-        hn_rd_addr     = {HN_AW{1'b0}};
-        hw_rd_addr     = {HW_AW{1'b0}};
-        rd_cache_raddr = (pa[23:20] == TAG_REF) ? pa[RD_AW-1:0] : pb[RD_AW-1:0];
-        rmap_raddr     = qspi_rdata_valid ? qspi_rdata[3:0] : exp_node_idx[3:0];
-
-        if (state == S_IDLE && dbg_pending && dbg_mem_addr[23:20] == 4'h1) begin
-            hn_rd_addr = dbg_mem_addr[3 +: HN_AW];
-        end else if (state == S_RD_A) begin
-            if (pa[23:20] == TAG_ERA || pb[23:20] == TAG_ERA) begin
-                hn_rd_addr = (pa[23:20] == TAG_ERA) ? pb[HN_AW-1:0] : pa[HN_AW-1:0];
-            end else begin
-                hn_rd_addr = (pb[23:20] == TAG_DUP && pa[23:20] != TAG_DUP) ? pb[HN_AW-1:0] :
-                             (pb[23:20] == TAG_NUM && pa[23:20] != TAG_NUM && pa[23:20] != TAG_DUP) ? pb[HN_AW-1:0] : pa[HN_AW-1:0];
-            end
-        end else if (state == S_RD_B) begin
-            hn_rd_addr = pb[HN_AW-1:0];
-        end
-
-        if (state == S_IDLE && dbg_pending && dbg_mem_addr[23:20] == 4'h2) begin
-            hw_rd_addr = dbg_mem_addr[2 +: HW_AW];
-        end else if (state == S_LINK) begin
-            hw_rd_addr = (gen_la[23:20] == TAG_VAR) ? gen_la[HW_AW-1:0] : gen_lb[HW_AW-1:0];
-        end
-
         if (state == S_IDLE && dbg_pending && dbg_mem_addr[23:20] == 4'h3) begin
-            dq_rd_addr = dbg_mem_addr[2 +: DQ_AW];
+            dq_rd_addr = dbg_mem_addr[3 +: TILE_W];
         end else if (state == S_SPILL_WR) begin
-            dq_rd_addr = {{TILE_W{1'b0}}, dq_head[0]};
+            dq_rd_addr = {TILE_W{1'b0}};
         end else begin
-            slot       = dq_pick_steal ? dq_head[dq_pick_tile] : (dq_tail[dq_pick_tile] - 2'd1);
-            dq_rd_addr = {dq_pick_tile, slot};
+            dq_rd_addr = dq_pick_tile;
         end
     end
 
@@ -669,50 +460,37 @@ module inet_core #(
     integer idx_i;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            hot_node_used <= {HOT_NODES{1'b0}};
-            hot_wire_used <= {HOT_WIRES{1'b0}};
+            hot_node_used <= 1'b0;
+            hot_wire_used <= 1'b0;
 
             for (idx_i = 0; idx_i < 4; idx_i = idx_i + 1) begin
-                alloc_n[idx_i] <= 15'd0;
-                alloc_w[idx_i] <= 15'd0;
+                alloc_n[idx_i] <= 12'd0;
+                alloc_w[idx_i] <= 12'd0;
             end
             for (idx_i = 0; idx_i < 2; idx_i = idx_i + 1) begin
                 roots[idx_i] <= 24'd0;
             end
+            hn_slot <= 48'd0;
+            hw_slot <= 24'd0;
             for (idx_i = 0; idx_i < N_TILES; idx_i = idx_i + 1) begin
-                dq_head[idx_i] <= 2'd0;
-                dq_tail[idx_i] <= 2'd0;
-                dq_cnt[idx_i]  <= 3'd0;
+                dq_mem[idx_i] <= 48'd0;
             end
-
-            rf_wdata        <= 48'd0;
-            ref_cache_valid <= {REF_DIR_ENTRIES{1'b0}};
-            rd_cache_we     <= 1'b0;
-            rd_cache_waddr  <= {RD_AW{1'b0}};
-            rmap_we         <= 1'b0;
-            rmap_waddr      <= 4'd0;
-            rmap_wdata      <= {RMAP_W{1'b0}};
-            hn_wr_en        <= 1'b0;
-            hn_wr_addr      <= {HN_AW{1'b0}};
-            hw_wr_en        <= 1'b0;
-            hw_wr_addr      <= {HW_AW{1'b0}};
-            dq_wr_en        <= 1'b0;
-            dq_wr_addr      <= {DQ_AW{1'b0}};
+            dq_valid        <= {N_TILES{1'b0}};
 
             booted          <= 1'b0;
             err_boot        <= 1'b0;
             err_linear      <= 1'b0;
             err_type        <= 1'b0;
-            cycle_cnt_r     <= 24'd0;
-            redex_cnt_r     <= 20'd0;
-            qspi_txn_cnt_r  <= 20'd0;
-            hot_hit_cnt     <= 16'd0;
-            psram_spill_cnt <= 16'd0;
+            cycle_cnt_r     <= 20'd0;
+            redex_cnt_r     <= 14'd0;
+            qspi_txn_cnt_r  <= 14'd0;
+            hot_hit_cnt     <= 10'd0;
+            psram_spill_cnt <= 10'd0;
             io_inflight_cnt <= 4'd0;
 
-            psram_next_node <= HOT_NODES_15;
-            psram_next_wire <= HOT_WIRES_15;
-            spill_cnt       <= 12'd0;
+            psram_next_node <= HOT_NODES_12;
+            psram_next_wire <= HOT_WIRES_12;
+            spill_cnt       <= 10'd0;
 
             state           <= S_IDLE;
             after_spill     <= S_IDLE;
@@ -731,35 +509,29 @@ module inet_core #(
             chain_active    <= 1'b0;
             lnk_idx         <= 3'd0;
             lnk_cnt         <= 3'd0;
-            cur_wid         <= 15'd0;
+            cur_wid         <= 12'd0;
 
-            alloc_step        <= 5'd0;
+            alloc_step        <= 3'd0;
             alloc_need_n      <= 3'd0;
             alloc_need_w      <= 3'd0;
             wr_step           <= 3'd0;
             wr_total          <= 3'd0;
             wr_phase          <= 1'b0;
 
-            exp_ref_id        <= 16'd0;
-            exp_woff          <= 18'd0;
+            exp_ref_id        <= 8'd0;
+            exp_woff          <= 14'd0;
             exp_nnodes        <= 5'd0;
-            exp_nwires        <= 5'd0;
             exp_nredex        <= 4'd0;
-            exp_base_nid      <= 15'd0;
-            exp_base_wid      <= 15'd0;
+            exp_base_nid      <= 12'd0;
+            exp_base_wid      <= 12'd0;
             exp_node_idx      <= 5'd0;
             exp_redex_idx     <= 4'd0;
             exp_phase         <= 3'd0;
-            exp_use_map       <= 1'b0;
-            exp_all_nodes_hot <= 1'b0;
-            exp_cold_ncnt     <= 5'd0;
-            exp_cold_wcnt     <= 5'd0;
-            cur_dst_nmap      <= {(RMAP_IW+1){1'b0}};
 
             qspi_cmd_valid   <= 1'b0;
             qspi_cmd_dev     <= 2'd0;
             qspi_cmd_write   <= 1'b0;
-            qspi_cmd_addr    <= 24'd0;
+            qspi_cmd_waddr   <= 18'd0;
             qspi_cmd_words   <= 5'd0;
             qspi_wdata_valid <= 1'b0;
             qspi_rdata_ready <= 1'b1;
@@ -769,35 +541,26 @@ module inet_core #(
             ppi_inj_ready    <= 1'b0;
 
             dbg_mmio_valid   <= 1'b0;
-            dbg_mmio_dev     <= 4'd0;
-            dbg_mmio_op      <= 4'd0;
-            dbg_mmio_wdata   <= 8'd0;
             dbg_mem_ready    <= 1'b0;
-            dbg_mem_rdata    <= 32'd0;
             dbg_pending      <= 1'b0;
             step_armed       <= 1'b0;
         end else if (dbg_reset_pulse) begin
-            hot_node_used    <= {HOT_NODES{1'b0}};
-            hot_wire_used    <= {HOT_WIRES{1'b0}};
-            ref_cache_valid  <= {REF_DIR_ENTRIES{1'b0}};
-            for (idx_i = 0; idx_i < N_TILES; idx_i = idx_i + 1) begin
-                dq_head[idx_i] <= 2'd0;
-                dq_tail[idx_i] <= 2'd0;
-                dq_cnt[idx_i]  <= 3'd0;
-            end
+            hot_node_used    <= 1'b0;
+            hot_wire_used    <= 1'b0;
+            dq_valid         <= {N_TILES{1'b0}};
             booted           <= 1'b0;
             err_boot         <= 1'b0;
             err_linear       <= 1'b0;
             err_type         <= 1'b0;
-            cycle_cnt_r      <= 24'd0;
-            redex_cnt_r      <= 20'd0;
-            qspi_txn_cnt_r   <= 20'd0;
-            hot_hit_cnt      <= 16'd0;
-            psram_spill_cnt  <= 16'd0;
+            cycle_cnt_r      <= 20'd0;
+            redex_cnt_r      <= 14'd0;
+            qspi_txn_cnt_r   <= 14'd0;
+            hot_hit_cnt      <= 10'd0;
+            psram_spill_cnt  <= 10'd0;
             io_inflight_cnt  <= 4'd0;
-            psram_next_node  <= HOT_NODES_15;
-            psram_next_wire  <= HOT_WIRES_15;
-            spill_cnt        <= 12'd0;
+            psram_next_node  <= HOT_NODES_12;
+            psram_next_wire  <= HOT_WIRES_12;
+            spill_cnt        <= 10'd0;
             state            <= S_IDLE;
             q_active         <= 1'b0;
             chain_active     <= 1'b0;
@@ -810,23 +573,12 @@ module inet_core #(
             dbg_mem_ready    <= 1'b0;
             dbg_pending      <= 1'b0;
             step_armed       <= 1'b0;
-            hn_wr_en         <= 1'b0;
-            hw_wr_en         <= 1'b0;
-            dq_wr_en         <= 1'b0;
-            rd_cache_we      <= 1'b0;
-            rmap_we          <= 1'b0;
         end else begin : main_seq
             reg              pop_en, steal_en, spill_pop0;
             reg [TILE_W-1:0] pop_tile;
             reg              push_en;
             reg [TILE_W-1:0] push_tile;
             reg [23:0]       push_a, push_b;
-
-            hn_wr_en    <= 1'b0;
-            hw_wr_en    <= 1'b0;
-            dq_wr_en    <= 1'b0;
-            rd_cache_we <= 1'b0;
-            rmap_we     <= 1'b0;
 
             pop_en     = 1'b0;
             steal_en   = 1'b0;
@@ -846,81 +598,73 @@ module inet_core #(
 
             if (dbg_step_pulse) step_armed <= 1'b1;
             if (dbg_mem_req && !dbg_mem_ready && state != S_DBG_QSPI && state != S_DBG_MMIO) dbg_pending <= 1'b1;
-            if (core_busy && !effective_halt) cycle_cnt_r <= cycle_cnt_r + 24'd1;
-
-            if (!qspi_rdata_valid && exp_use_map) begin
-                cur_dst_nmap <= rmap_rdata[RMAP_IW:0];
-            end
+            if (core_busy && !effective_halt) cycle_cnt_r <= cycle_cnt_r + 20'd1;
 
             case (state)
                 S_IDLE: begin
                     q_active <= 1'b0;
                     if (dbg_pending && !dbg_mem_ready) begin : dbg_enter
                         reg [3:0]  region;
-                        reg [14:0] dn, dw;
+                        reg [11:0] dn, dw;
                         region = dbg_mem_addr[23:20];
-                        dn     = dbg_mem_addr[17:3];
-                        dw     = dbg_mem_addr[16:2];
+                        dn     = dbg_mem_addr[14:3];
+                        dw     = dbg_mem_addr[13:2];
                         dbg_pending <= 1'b0;
                         if (region == 4'h0) begin
                             case (dbg_mem_addr[4:2])
                                 3'd0, 3'd1: begin
                                     if (dbg_mem_we) roots[dbg_mem_addr[2]] <= dbg_mem_wdata[23:0];
-                                    dbg_mem_rdata <= {8'd0, roots[dbg_mem_addr[2]]};
+                                    {buf_a1[7:0], buf_a0} <= {8'd0, roots[dbg_mem_addr[2]]};
                                 end
-                                3'd4: dbg_mem_rdata <= {
+                                3'd4: {buf_a1[7:0], buf_a0} <= {
                                     8'd0,
-                                    popcount_hn(hot_node_used),
-                                    popcount_hw(hot_wire_used),
+                                    {7'd0, hot_node_used},
+                                    {7'd0, hot_wire_used},
                                     3'd0, err_type, err_linear, err_boot,
                                     booted, core_busy
                                 };
-                                3'd5: dbg_mem_rdata <= {16'd0, hot_hit_cnt};
-                                3'd6: dbg_mem_rdata <= {16'd0, psram_spill_cnt};
-                                default: dbg_mem_rdata <= 32'd0;
+                                3'd5: {buf_a1[7:0], buf_a0} <= {22'd0, hot_hit_cnt};
+                                3'd6: {buf_a1[7:0], buf_a0} <= {22'd0, psram_spill_cnt};
+                                default: {buf_a1[7:0], buf_a0} <= 32'd0;
                             endcase
                             dbg_mem_ready <= 1'b1;
                         end else if (region == 4'h1) begin
-                            if (dn < HOT_NODES_15) begin
+                            if (dn < HOT_NODES_12) begin
                                 if (dbg_mem_we) begin
-                                    hn_wr_en   <= 1'b1;
-                                    hn_wr_addr <= dn[HN_AW-1:0];
-                                    rf_wdata   <= {dbg_mem_addr[2] ? dbg_mem_wdata[23:0] : hn_rd_a1,
-                                                   dbg_mem_addr[2] ? hn_rd_a0 : dbg_mem_wdata[23:0]};
-                                    hot_node_used[dn[HN_AW-1:0]] <= 1'b1;
+                                    hn_slot <= {dbg_mem_addr[2] ? dbg_mem_wdata[23:0] : hn_rd_a1,
+                                                dbg_mem_addr[2] ? hn_rd_a0 : dbg_mem_wdata[23:0]};
+                                    hot_node_used <= 1'b1;
                                 end
-                                dbg_mem_rdata <= {8'd0, dbg_mem_addr[2] ? hn_rd_a1 : hn_rd_a0};
+                                {buf_a1[7:0], buf_a0} <= {8'd0, dbg_mem_addr[2] ? hn_rd_a1 : hn_rd_a0};
                                 dbg_mem_ready <= 1'b1;
                             end else if (!qspi_busy && qspi_cmd_ready) begin
                                 qspi_cmd_valid   <= 1'b1;
                                 qspi_cmd_dev     <= 2'd1;
                                 qspi_cmd_write   <= dbg_mem_we;
-                                qspi_cmd_addr    <= {6'd0, dn, dbg_mem_addr[2], 2'b00};
+                                qspi_cmd_waddr   <= {5'd0, dn, dbg_mem_addr[2]};
                                 qspi_cmd_words   <= 5'd0;
                                 qspi_wdata_valid <= dbg_mem_we;
-                                qspi_txn_cnt_r   <= qspi_txn_cnt_r + 20'd1;
+                                qspi_txn_cnt_r   <= qspi_txn_cnt_r + 14'd1;
                                 state            <= S_DBG_QSPI;
                             end else begin
                                 dbg_pending <= 1'b1;
                             end
                         end else if (region == 4'h2) begin
-                            if (dw < HOT_WIRES_15) begin
+                            if (dw < HOT_WIRES_12) begin
                                 if (dbg_mem_we) begin
-                                    hw_wr_en        <= 1'b1;
-                                    hw_wr_addr      <= dw[HW_AW-1:0];
-                                    rf_wdata[23:0]  <= dbg_mem_wdata[23:0];
-                                    hot_wire_used[dw[HW_AW-1:0]] <= (dbg_mem_wdata[23:20] != TAG_FREE);
+                                    hw_slot       <= dbg_mem_wdata[23:0];
+                                    hot_wire_used <= (dbg_mem_wdata[23:20] != TAG_FREE);
                                 end
-                                dbg_mem_rdata <= {8'd0, hw_rd_data};
+                                {buf_a1[7:0], buf_a0} <= {8'd0, hw_rd_data};
                                 dbg_mem_ready <= 1'b1;
                             end else if (!qspi_busy && qspi_cmd_ready) begin
                                 qspi_cmd_valid   <= 1'b1;
                                 qspi_cmd_dev     <= 2'd1;
                                 qspi_cmd_write   <= dbg_mem_we;
-                                qspi_cmd_addr    <= 24'h040000 + {7'd0, dw, 2'b00};
+                                qspi_cmd_waddr   <= {2'b01, 4'd0, dw};
                                 qspi_cmd_words   <= 5'd0;
                                 qspi_wdata_valid <= dbg_mem_we;
-                                qspi_txn_cnt_r   <= qspi_txn_cnt_r + 20'd1;
+                                qspi_txn_cnt_r   <= qspi_txn_cnt_r + 14'd1;
                                 state            <= S_DBG_QSPI;
                             end else begin
                                 dbg_pending <= 1'b1;
@@ -929,7 +673,7 @@ module inet_core #(
                             if (dbg_mem_we) begin
                                 if (!dbg_mem_addr[2]) begin
                                     pa            <= dbg_mem_wdata[23:0];
-                                    dbg_mem_rdata <= dbg_mem_wdata;
+                                    {buf_a1[7:0], buf_a0} <= dbg_mem_wdata;
                                     dbg_mem_ready <= 1'b1;
                                 end else begin
                                     kind          <= K_DIRECT;
@@ -939,12 +683,12 @@ module inet_core #(
                                     lnk_idx       <= 3'd0;
                                     lnk_cnt       <= 3'd1;
                                     after_link    <= S_IDLE;
-                                    dbg_mem_rdata <= dbg_mem_wdata;
+                                    {buf_a1[7:0], buf_a0} <= dbg_mem_wdata;
                                     dbg_mem_ready <= 1'b1;
                                     state         <= S_LINK;
                                 end
                             end else begin
-                                dbg_mem_rdata <= {8'd0, dbg_mem_addr[1] ? dq_rd_data[47:24] : dq_rd_data[23:0]};
+                                {buf_a1[7:0], buf_a0} <= {8'd0, dbg_mem_addr[1] ? dq_rd_data[47:24] : dq_rd_data[23:0]};
                                 dbg_mem_ready <= 1'b1;
                             end
                         end else if (region == 4'h4 || region == 4'h5 || region == 4'h6) begin
@@ -953,22 +697,19 @@ module inet_core #(
                                 qspi_cmd_dev     <= (region == 4'h4) ? 2'd0 :
                                                     (region == 4'h5) ? 2'd1 : 2'd2;
                                 qspi_cmd_write   <= (region != 4'h4) && dbg_mem_we;
-                                qspi_cmd_addr    <= {4'd0, dbg_mem_addr[19:0]};
+                                qspi_cmd_waddr   <= dbg_mem_addr[19:2];
                                 qspi_cmd_words   <= 5'd0;
                                 qspi_wdata_valid <= (region != 4'h4) && dbg_mem_we;
-                                qspi_txn_cnt_r   <= qspi_txn_cnt_r + 20'd1;
+                                qspi_txn_cnt_r   <= qspi_txn_cnt_r + 14'd1;
                                 state            <= S_DBG_QSPI;
                             end else begin
                                 dbg_pending <= 1'b1;
                             end
                         end else if (region == 4'h7) begin
                             dbg_mmio_valid <= 1'b1;
-                            dbg_mmio_dev   <= dbg_mem_addr[11:8];
-                            dbg_mmio_op    <= dbg_mem_addr[5:2];
-                            dbg_mmio_wdata <= dbg_mem_we ? dbg_mem_wdata[7:0] : 8'd0;
                             state          <= S_DBG_MMIO;
                         end else begin
-                            dbg_mem_rdata <= 32'd0;
+                            {buf_a1[7:0], buf_a0} <= 32'd0;
                             dbg_mem_ready <= 1'b1;
                         end
                     end else if (ppi_inj_valid) begin
@@ -986,10 +727,10 @@ module inet_core #(
                             qspi_cmd_valid <= 1'b1;
                             qspi_cmd_dev   <= 2'd0;
                             qspi_cmd_write <= 1'b0;
-                            qspi_cmd_addr  <= 24'h000000;
+                            qspi_cmd_waddr <= 18'd0;
                             qspi_cmd_words <= 5'd3;
                             exp_phase      <= 3'd0;
-                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 20'd1;
+                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 14'd1;
                             state          <= S_BOOT;
                         end
                     end else if (io_out_valid) begin
@@ -1006,7 +747,7 @@ module inet_core #(
                     end else if (all_dq_full && !qspi_busy && qspi_cmd_ready) begin
                         after_spill <= S_IDLE;
                         state       <= S_SPILL_WR;
-                    end else if (!any_dq_nonempty && (spill_cnt != 12'd0) && !qspi_busy && qspi_cmd_ready) begin
+                    end else if (!any_dq_nonempty && (spill_cnt != 10'd0) && !qspi_busy && qspi_cmd_ready) begin
                         state <= S_REFILL_RD;
                     end else if (allow_step && dq_pick_found) begin
                         cur_tile   <= dq_pick_tile;
@@ -1045,7 +786,7 @@ module inet_core #(
                 // ---- SWD QSPI / MMIO Passthrough ----
                 S_DBG_QSPI: begin
                     if (qspi_wdata_valid && qspi_wdata_ready) qspi_wdata_valid <= 1'b0;
-                    if (qspi_rdata_valid) dbg_mem_rdata <= qspi_rdata;
+                    if (qspi_rdata_valid) {buf_a1[7:0], buf_a0} <= qspi_rdata;
                     if (!qspi_busy && !qspi_cmd_valid) begin
                         dbg_mem_ready <= 1'b1;
                         state         <= S_IDLE;
@@ -1054,7 +795,7 @@ module inet_core #(
 
                 S_DBG_MMIO: begin
                     if (dbg_mmio_ready) begin
-                        dbg_mem_rdata <= {16'd0, dbg_mmio_rdata};
+                        {buf_a1[7:0], buf_a0} <= {16'd0, dbg_mmio_rdata};
                         dbg_mem_ready <= 1'b1;
                         state         <= S_IDLE;
                     end
@@ -1067,39 +808,18 @@ module inet_core #(
                     ta = pa[23:20];
                     tb = pb[23:20];
                     if ((ta == TAG_REF && tb != TAG_DUP && tb != TAG_ERA) ||
-                        (tb == TAG_REF && ta != TAG_DUP && ta != TAG_ERA)) begin : ref_hit
-                        reg [15:0] rid;
-                        reg [RD_AW-1:0] cidx;
-                        rid  = (ta == TAG_REF) ? pa[15:0] : pb[15:0];
-                        cidx = rid[RD_AW-1:0];
-                        redex_cnt_r   <= redex_cnt_r + 20'd1;
-                        exp_ref_id    <= rid;
+                        (tb == TAG_REF && ta != TAG_DUP && ta != TAG_ERA)) begin
+                        redex_cnt_r   <= redex_cnt_r + 14'd1;
+                        exp_ref_id    <= (ta == TAG_REF) ? pa[7:0] : pb[7:0];
                         pa            <= (ta == TAG_REF) ? pb : pa; // exp_other
                         exp_node_idx  <= 5'd0;
                         exp_redex_idx <= 4'd0;
-                        alloc_step    <= 5'd0;
-                        exp_cold_ncnt <= 5'd0;
-                        exp_cold_wcnt <= 5'd0;
-                        exp_all_nodes_hot <= 1'b1;
-                        if (rid[15:8] == 8'd0 && ref_cache_valid[cidx] &&
-                            rd_cache_rdata[32 +: RD_TAG_W] == rid[7:RD_AW]) begin : h0
-                            reg [31:0] d;
-                            d = rd_cache_rdata[31:0];
-                            exp_woff     <= d[17:0];
-                            exp_nnodes   <= d[22:18];
-                            exp_nwires   <= d[27:23];
-                            exp_nredex   <= d[31:28];
-                            exp_base_nid <= psram_next_node;
-                            exp_base_wid <= psram_next_wire;
-                            state        <= S_REF_ALLOC;
-                        end else begin
-                            state <= S_REF_DIR;
-                        end
+                        state         <= S_REF_DIR;
                     end else if (ta == TAG_ERA || tb == TAG_ERA) begin
                         nb = (ta == TAG_ERA) ? pb : pa;
                         if (nb[23] && nb[23:20] != TAG_IO) begin
                             if (nb[15:0] < HOT_NODES_16) begin
-                                hot_hit_cnt <= hot_hit_cnt + 16'd1;
+                                hot_hit_cnt <= hot_hit_cnt + 10'd1;
                                 buf_b0      <= hn_rd_a0;
                                 buf_b1      <= hn_rd_a1;
                                 state       <= S_DISP;
@@ -1108,11 +828,11 @@ module inet_core #(
                                     qspi_cmd_valid <= 1'b1;
                                     qspi_cmd_dev   <= 2'd1;
                                     qspi_cmd_write <= 1'b0;
-                                    qspi_cmd_addr  <= {6'd0, nb[14:0], 3'b000};
+                                    qspi_cmd_waddr <= {2'd0, nb[14:0], 1'b0};
                                     qspi_cmd_words <= 5'd1;
                                     exp_phase      <= 3'd0;
                                     q_active       <= 1'b1;
-                                    qspi_txn_cnt_r <= qspi_txn_cnt_r + 20'd1;
+                                    qspi_txn_cnt_r <= qspi_txn_cnt_r + 14'd1;
                                 end
                             end else begin
                                 if (qspi_rdata_valid) begin
@@ -1139,7 +859,7 @@ module inet_core #(
                         if (!na[23]) begin
                             state <= S_RD_B;
                         end else if (na[15:0] < HOT_NODES_16) begin
-                            hot_hit_cnt <= hot_hit_cnt + 16'd1;
+                            hot_hit_cnt <= hot_hit_cnt + 10'd1;
                             buf_a0      <= hn_rd_a0;
                             buf_a1      <= hn_rd_a1;
                             state       <= S_RD_B;
@@ -1148,11 +868,11 @@ module inet_core #(
                                 qspi_cmd_valid <= 1'b1;
                                 qspi_cmd_dev   <= 2'd1;
                                 qspi_cmd_write <= 1'b0;
-                                qspi_cmd_addr  <= {6'd0, na[14:0], 3'b000};
+                                qspi_cmd_waddr <= {2'd0, na[14:0], 1'b0};
                                 qspi_cmd_words <= 5'd1;
                                 exp_phase      <= 3'd0;
                                 q_active       <= 1'b1;
-                                qspi_txn_cnt_r <= qspi_txn_cnt_r + 20'd1;
+                                qspi_txn_cnt_r <= qspi_txn_cnt_r + 14'd1;
                             end
                         end else begin
                             if (qspi_rdata_valid) begin
@@ -1172,7 +892,7 @@ module inet_core #(
                     if (!pb[23] || (pa[23:20] == TAG_DUP && pb[23:20] == TAG_IO)) begin
                         state <= S_DISP;
                     end else if (pb[15:0] < HOT_NODES_16) begin
-                        hot_hit_cnt <= hot_hit_cnt + 16'd1;
+                        hot_hit_cnt <= hot_hit_cnt + 10'd1;
                         buf_b0      <= hn_rd_a0;
                         buf_b1      <= hn_rd_a1;
                         state       <= S_DISP;
@@ -1181,11 +901,11 @@ module inet_core #(
                             qspi_cmd_valid <= 1'b1;
                             qspi_cmd_dev   <= 2'd1;
                             qspi_cmd_write <= 1'b0;
-                            qspi_cmd_addr  <= {6'd0, pb[14:0], 3'b000};
+                            qspi_cmd_waddr <= {2'd0, pb[14:0], 1'b0};
                             qspi_cmd_words <= 5'd1;
                             exp_phase      <= 3'd0;
                             q_active       <= 1'b1;
-                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 20'd1;
+                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 14'd1;
                         end
                     end else begin
                         if (qspi_rdata_valid) begin
@@ -1204,7 +924,7 @@ module inet_core #(
                     reg [3:0] ta, tb;
                     ta = pa[23:20];
                     tb = pb[23:20];
-                    redex_cnt_r  <= redex_cnt_r + 20'd1;
+                    redex_cnt_r  <= redex_cnt_r + 14'd1;
                     chain_active <= 1'b0;
                     lnk_idx      <= 3'd0;
                     after_link   <= S_IDLE;
@@ -1220,7 +940,7 @@ module inet_core #(
                             err_linear <= 1'b1;
                             state      <= S_IDLE;
                         end else if (toth[3]) begin
-                            if (voth < HOT_NODES_16) hot_node_used[voth[HN_AW-1:0]] <= 1'b0;
+                            if (voth < HOT_NODES_16) hot_node_used <= 1'b0;
                             if (toth == TAG_OP1 || buf_b1[23:20] == TAG_FREE) begin
                                 kind    <= K_ERA_1;
                                 lnk_cnt <= 3'd1;
@@ -1237,21 +957,21 @@ module inet_core #(
                             err_linear <= 1'b1;
                             state      <= S_IDLE;
                         end else if (tb == TAG_NUM || tb == TAG_REF) begin
-                            if (pa[15:0] < HOT_NODES_16) hot_node_used[pa[HN_AW-1:0]] <= 1'b0;
+                            if (pa[15:0] < HOT_NODES_16) hot_node_used <= 1'b0;
                             kind    <= K_DUP_ATOM;
                             lnk_cnt <= 3'd2;
                             state   <= S_LINK;
                         end else if (tb == TAG_DUP && pa[19:16] == pb[19:16]) begin
-                            if (pa[15:0] < HOT_NODES_16) hot_node_used[pa[HN_AW-1:0]] <= 1'b0;
-                            if (pb[15:0] < HOT_NODES_16) hot_node_used[pb[HN_AW-1:0]] <= 1'b0;
+                            if (pa[15:0] < HOT_NODES_16) hot_node_used <= 1'b0;
+                            if (pb[15:0] < HOT_NODES_16) hot_node_used <= 1'b0;
                             kind    <= K_PAIR2;
                             lnk_cnt <= 3'd2;
                             state   <= S_LINK;
                         end else if (tb == TAG_OP1 || tb == TAG_CON || tb == TAG_DUP ||
                                      tb == TAG_OPR || tb == TAG_SWI) begin
-                            if (pa[15:0] < HOT_NODES_16) hot_node_used[pa[HN_AW-1:0]] <= 1'b0;
-                            if (pb[15:0] < HOT_NODES_16) hot_node_used[pb[HN_AW-1:0]] <= 1'b0;
-                            alloc_step <= 5'd0;
+                            if (pa[15:0] < HOT_NODES_16) hot_node_used <= 1'b0;
+                            if (pb[15:0] < HOT_NODES_16) hot_node_used <= 1'b0;
+                            alloc_step <= 3'd0;
                             if (tb == TAG_OP1) begin
                                 kind         <= K_DUP_OP1;
                                 alloc_need_n <= 3'd3;
@@ -1271,8 +991,8 @@ module inet_core #(
                             state    <= S_IDLE;
                         end
                     end else if (ta == TAG_CON && tb == TAG_CON) begin
-                        if (pa[15:0] < HOT_NODES_16) hot_node_used[pa[HN_AW-1:0]] <= 1'b0;
-                        if (pb[15:0] < HOT_NODES_16) hot_node_used[pb[HN_AW-1:0]] <= 1'b0;
+                        if (pa[15:0] < HOT_NODES_16) hot_node_used <= 1'b0;
+                        if (pb[15:0] < HOT_NODES_16) hot_node_used <= 1'b0;
                         kind    <= K_PAIR2;
                         lnk_cnt <= 3'd2;
                         state   <= S_LINK;
@@ -1283,7 +1003,7 @@ module inet_core #(
                             lnk_cnt  <= 3'd1;
                             state    <= S_WR;
                         end else if (tb == TAG_OP1) begin
-                            if (pb[15:0] < HOT_NODES_16) hot_node_used[pb[HN_AW-1:0]] <= 1'b0;
+                            if (pb[15:0] < HOT_NODES_16) hot_node_used <= 1'b0;
                             kind    <= K_OP1;
                             lnk_cnt <= 3'd1;
                             state   <= S_LINK;
@@ -1295,7 +1015,7 @@ module inet_core #(
                                 state    <= S_WR;
                             end else begin
                                 kind         <= K_SWI_NZ;
-                                alloc_step   <= 5'd0;
+                                alloc_step   <= 3'd0;
                                 alloc_need_n <= 3'd1;
                                 alloc_need_w <= 3'd0;
                                 wr_total     <= 3'd2;
@@ -1303,7 +1023,7 @@ module inet_core #(
                                 state        <= S_ALLOC;
                             end
                         end else if (tb == TAG_IO) begin
-                            if (pb[15:0] < HOT_NODES_16) hot_node_used[pb[HN_AW-1:0]] <= 1'b0;
+                            if (pb[15:0] < HOT_NODES_16) hot_node_used <= 1'b0;
                             state <= S_IO;
                         end else begin
                             err_type <= 1'b1;
@@ -1317,55 +1037,51 @@ module inet_core #(
 
                 // ---- Sequential 1-Per-Cycle Allocator ----
                 S_ALLOC: begin
-                    if (alloc_step[2:0] < alloc_need_n) begin
-                        if (free_hot_n[HN_AW]) begin
-                            hot_node_used[free_hot_n[HN_AW-1:0]] <= 1'b1;
-                            alloc_n[alloc_step[1:0]]             <= {{(15-HN_AW){1'b0}}, free_hot_n[HN_AW-1:0]};
+                    if (alloc_step < alloc_need_n) begin
+                        if (!hot_node_used) begin
+                            hot_node_used            <= 1'b1;
+                            alloc_n[alloc_step[1:0]] <= 12'd0;
                         end else begin
                             alloc_n[alloc_step[1:0]] <= psram_next_node;
-                            psram_next_node          <= psram_next_node + 15'd1;
+                            psram_next_node          <= psram_next_node + 12'd1;
                         end
                     end
-                    if (alloc_step[2:0] < alloc_need_w) begin
-                        if (free_hot_w[HW_AW]) begin
-                            hot_wire_used[free_hot_w[HW_AW-1:0]] <= 1'b1;
-                            hw_wr_en                             <= 1'b1;
-                            hw_wr_addr                           <= free_hot_w[HW_AW-1:0];
-                            rf_wdata[23:0]                       <= 24'd0;
-                            alloc_w[alloc_step[1:0]]             <= {{(15-HW_AW){1'b0}}, free_hot_w[HW_AW-1:0]};
+                    if (alloc_step < alloc_need_w) begin
+                        if (!hot_wire_used) begin
+                            hot_wire_used            <= 1'b1;
+                            hw_slot                  <= 24'd0;
+                            alloc_w[alloc_step[1:0]] <= 12'd0;
                         end else begin
                             alloc_w[alloc_step[1:0]] <= psram_next_wire;
-                            psram_next_wire          <= psram_next_wire + 15'd1;
+                            psram_next_wire          <= psram_next_wire + 12'd1;
                         end
                     end
-                    if (alloc_step[2:0] + 3'd1 >= alloc_need_n && alloc_step[2:0] + 3'd1 >= alloc_need_w) begin
+                    if (alloc_step + 3'd1 >= alloc_need_n && alloc_step + 3'd1 >= alloc_need_w) begin
                         wr_step <= 3'd0;
                         state   <= S_WR;
                     end else begin
-                        alloc_step <= alloc_step + 5'd1;
+                        alloc_step <= alloc_step + 3'd1;
                     end
                 end
 
-                // ---- Sequential Node Writeback (Hot Latch RF or PSRAM A) ----
+                // ---- Sequential Node Writeback (Hot DFF Slot or PSRAM A) ----
                 S_WR: begin
                     if (wr_step >= wr_total) begin
                         state <= S_LINK;
-                    end else if (wr_nid < HOT_NODES_15) begin
-                        hn_wr_en   <= 1'b1;
-                        hn_wr_addr <= wr_nid[HN_AW-1:0];
-                        rf_wdata   <= {wr_a1, wr_a0};
-                        wr_step    <= wr_step + 3'd1;
+                    end else if (wr_nid < HOT_NODES_12) begin
+                        hn_slot <= {wr_a1, wr_a0};
+                        wr_step <= wr_step + 3'd1;
                     end else if (!q_active) begin
                         if (!qspi_busy && qspi_cmd_ready) begin
                             qspi_cmd_valid   <= 1'b1;
                             qspi_cmd_dev     <= 2'd1;
                             qspi_cmd_write   <= 1'b1;
-                            qspi_cmd_addr    <= {6'd0, wr_nid, 3'b000};
+                            qspi_cmd_waddr   <= {5'd0, wr_nid, 1'b0};
                             qspi_cmd_words   <= 5'd1;
                             qspi_wdata_valid <= 1'b1;
                             wr_phase         <= 1'b0;
                             q_active         <= 1'b1;
-                            qspi_txn_cnt_r   <= qspi_txn_cnt_r + 20'd1;
+                            qspi_txn_cnt_r   <= qspi_txn_cnt_r + 14'd1;
                         end
                     end else begin
                         if (qspi_wdata_valid && qspi_wdata_ready) begin
@@ -1405,22 +1121,18 @@ module inet_core #(
                             lnb   = (lta == TAG_VAR) ? lb : la;
                             if (lna_v < HOT_WIRES_16) begin
                                 if (hw_rd_data[23:20] == TAG_FREE) begin
-                                    hw_wr_en       <= 1'b1;
-                                    hw_wr_addr     <= lna_v[HW_AW-1:0];
-                                    rf_wdata[23:0] <= lnb;
-                                    chain_active   <= 1'b0;
-                                    lnk_idx        <= lnk_idx + 3'd1;
+                                    hw_slot      <= lnb;
+                                    chain_active <= 1'b0;
+                                    lnk_idx      <= lnk_idx + 3'd1;
                                 end else begin
-                                    hot_wire_used[lna_v[HW_AW-1:0]] <= 1'b0;
-                                    hw_wr_en                        <= 1'b1;
-                                    hw_wr_addr                      <= lna_v[HW_AW-1:0];
-                                    rf_wdata[23:0]                  <= 24'd0;
-                                    chain_active                    <= 1'b1;
-                                    cur_la                          <= hw_rd_data;
-                                    cur_lb                          <= lnb;
+                                    hot_wire_used <= 1'b0;
+                                    hw_slot       <= 24'd0;
+                                    chain_active  <= 1'b1;
+                                    cur_la        <= hw_rd_data;
+                                    cur_lb        <= lnb;
                                 end
                             end else begin
-                                cur_wid      <= lna_v[14:0];
+                                cur_wid      <= lna_v[11:0];
                                 cur_la       <= la;
                                 cur_lb       <= lnb;
                                 chain_active <= 1'b1;
@@ -1434,7 +1146,7 @@ module inet_core #(
                             roots[lb[0]]   <= la;
                             chain_active   <= 1'b0;
                             lnk_idx        <= lnk_idx + 3'd1;
-                        end else if (dq_cnt[cur_tile] < 3'd4) begin
+                        end else if (!dq_valid[cur_tile]) begin
                             push_en = 1'b1; push_tile = cur_tile; push_a = la; push_b = lb;
                             chain_active <= 1'b0;
                             lnk_idx      <= lnk_idx + 3'd1;
@@ -1448,7 +1160,7 @@ module inet_core #(
                             for (pk = 1; pk < N_TILES; pk = pk + 1) begin
                                 psum_t = {{(3-TILE_W){1'b0}}, cur_tile} + pk[2:0];
                                 pcand  = (psum_t >= N_TILES[2:0]) ? (psum_t[TILE_W-1:0] - N_TILES[TILE_W-1:0]) : psum_t[TILE_W-1:0];
-                                if (!pfound && dq_cnt[pcand] < 3'd4) begin
+                                if (!pfound && !dq_valid[pcand]) begin
                                     pfound = 1'b1;
                                     ptile  = pcand;
                                 end
@@ -1474,10 +1186,10 @@ module inet_core #(
                             qspi_cmd_valid <= 1'b1;
                             qspi_cmd_dev   <= 2'd1;
                             qspi_cmd_write <= 1'b0;
-                            qspi_cmd_addr  <= 24'h040000 + {7'd0, cur_wid, 2'b00};
+                            qspi_cmd_waddr <= {2'b01, 4'd0, cur_wid};
                             qspi_cmd_words <= 5'd0;
                             q_active       <= 1'b1;
-                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 20'd1;
+                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 14'd1;
                         end
                     end else if (qspi_rdata_valid) begin
                         q_active <= 1'b0;
@@ -1493,11 +1205,11 @@ module inet_core #(
                             qspi_cmd_valid   <= 1'b1;
                             qspi_cmd_dev     <= 2'd1;
                             qspi_cmd_write   <= 1'b1;
-                            qspi_cmd_addr    <= 24'h040000 + {7'd0, cur_wid, 2'b00};
+                            qspi_cmd_waddr   <= {2'b01, 4'd0, cur_wid};
                             qspi_cmd_words   <= 5'd0;
                             qspi_wdata_valid <= 1'b1;
                             q_active         <= 1'b1;
-                            qspi_txn_cnt_r   <= qspi_txn_cnt_r + 20'd1;
+                            qspi_txn_cnt_r   <= qspi_txn_cnt_r + 14'd1;
                         end
                     end else begin
                         if (qspi_wdata_valid && qspi_wdata_ready) qspi_wdata_valid <= 1'b0;
@@ -1512,108 +1224,29 @@ module inet_core #(
                     end
                 end
 
-                // ---- Flash REF Expander (16-Entry Latch Dir + Per-Node/Wire Map) ----
+                // ---- Flash REF Expander ----
                 S_REF_DIR: begin
                     if (!q_active) begin
                         if (!qspi_busy && qspi_cmd_ready) begin
                             qspi_cmd_valid <= 1'b1;
                             qspi_cmd_dev   <= 2'd0;
                             qspi_cmd_write <= 1'b0;
-                            qspi_cmd_addr  <= 24'h000010 + {6'd0, exp_ref_id, 2'b00};
+                            qspi_cmd_waddr <= 18'h00004 + {10'd0, exp_ref_id};
                             qspi_cmd_words <= 5'd0;
                             q_active       <= 1'b1;
-                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 20'd1;
+                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 14'd1;
                         end
                     end else if (qspi_rdata_valid) begin
-                        q_active <= 1'b0;
-                        if (exp_ref_id[15:8] == 8'd0) begin
-                            ref_cache_valid[exp_ref_id[RD_AW-1:0]] <= 1'b1;
-                            rd_cache_we                <= 1'b1;
-                            rd_cache_waddr             <= exp_ref_id[RD_AW-1:0];
-                            rf_wdata[RD_TAG_W+31:0]    <= {exp_ref_id[7:RD_AW], qspi_rdata};
-                        end
-                        exp_woff     <= qspi_rdata[17:0];
-                        exp_nnodes   <= qspi_rdata[22:18];
-                        exp_nwires   <= qspi_rdata[27:23];
-                        exp_nredex   <= qspi_rdata[31:28];
-                        exp_base_nid <= psram_next_node;
-                        exp_base_wid <= psram_next_wire;
-                        state        <= S_REF_ALLOC;
-                    end
-                end
-
-                S_REF_ALLOC: begin : ref_alloc_blk
-                    reg                n_is_hot, w_is_hot;
-                    reg [RMAP_IW-1:0]  n_idx, w_idx;
-
-                    if (exp_nnodes == 5'd0 && exp_nwires == 5'd0) begin
-                        exp_use_map       <= 1'b0;
-                        exp_all_nodes_hot <= 1'b0;
-                        exp_node_idx      <= 5'd0;
-                        exp_redex_idx     <= 4'd0;
-                        exp_phase         <= 3'd0;
-                        q_active          <= 1'b0;
-                        state             <= S_REF_ROOT;
-                    end else if (exp_nnodes <= 5'd16 && exp_nwires <= 5'd16) begin
-                        exp_use_map <= 1'b1;
-                        n_is_hot    = 1'b0;
-                        n_idx       = {RMAP_IW{1'b0}};
-                        w_is_hot    = 1'b0;
-                        w_idx       = {RMAP_IW{1'b0}};
-
-                        if (alloc_step < exp_nnodes) begin
-                            if (free_hot_n[HN_AW]) begin
-                                n_is_hot = 1'b1;
-                                n_idx    = {{(RMAP_IW-HN_AW){1'b0}}, free_hot_n[HN_AW-1:0]};
-                                hot_node_used[free_hot_n[HN_AW-1:0]] <= 1'b1;
-                            end else begin
-                                n_is_hot          = 1'b0;
-                                n_idx             = exp_cold_ncnt[RMAP_IW-1:0];
-                                exp_cold_ncnt     <= exp_cold_ncnt + 5'd1;
-                                psram_next_node   <= psram_next_node + 15'd1;
-                                exp_all_nodes_hot <= 1'b0;
-                            end
-                        end
-
-                        if (alloc_step < exp_nwires) begin
-                            if (free_hot_w[HW_AW]) begin
-                                w_is_hot = 1'b1;
-                                w_idx    = {{(RMAP_IW-HW_AW){1'b0}}, free_hot_w[HW_AW-1:0]};
-                                hot_wire_used[free_hot_w[HW_AW-1:0]] <= 1'b1;
-                                hw_wr_en                             <= 1'b1;
-                                hw_wr_addr                           <= free_hot_w[HW_AW-1:0];
-                                rf_wdata[23:0]                       <= 24'd0;
-                            end else begin
-                                w_is_hot        = 1'b0;
-                                w_idx           = exp_cold_wcnt[RMAP_IW-1:0];
-                                exp_cold_wcnt   <= exp_cold_wcnt + 5'd1;
-                                psram_next_wire <= psram_next_wire + 15'd1;
-                            end
-                        end
-
-                        rmap_we    <= 1'b1;
-                        rmap_waddr <= alloc_step[3:0];
-                        rmap_wdata <= {w_is_hot, w_idx, n_is_hot, n_idx};
-
-                        if (alloc_step + 5'd1 >= exp_nnodes && alloc_step + 5'd1 >= exp_nwires) begin
-                            exp_node_idx  <= 5'd0;
-                            exp_redex_idx <= 4'd0;
-                            exp_phase     <= 3'd0;
-                            q_active      <= 1'b0;
-                            state         <= S_REF_ROOT;
-                        end else begin
-                            alloc_step <= alloc_step + 5'd1;
-                        end
-                    end else begin
-                        exp_use_map       <= 1'b0;
-                        exp_all_nodes_hot <= 1'b0;
-                        psram_next_node   <= psram_next_node + {10'd0, exp_nnodes};
-                        psram_next_wire   <= psram_next_wire + {10'd0, exp_nwires};
-                        exp_node_idx      <= 5'd0;
-                        exp_redex_idx     <= 4'd0;
-                        exp_phase         <= 3'd0;
-                        q_active          <= 1'b0;
-                        state             <= S_REF_ROOT;
+                        q_active        <= 1'b0;
+                        exp_woff        <= qspi_rdata[13:0];
+                        exp_nnodes      <= qspi_rdata[22:18];
+                        exp_nredex      <= qspi_rdata[31:28];
+                        exp_base_nid    <= psram_next_node;
+                        exp_base_wid    <= psram_next_wire;
+                        psram_next_node <= psram_next_node + {7'd0, qspi_rdata[22:18]};
+                        psram_next_wire <= psram_next_wire + {7'd0, qspi_rdata[27:23]};
+                        exp_phase       <= 3'd0;
+                        state           <= S_REF_ROOT;
                     end
                 end
 
@@ -1623,41 +1256,20 @@ module inet_core #(
                             qspi_cmd_valid <= 1'b1;
                             qspi_cmd_dev   <= 2'd0;
                             qspi_cmd_write <= 1'b0;
-                            qspi_cmd_addr  <= {4'd0, exp_woff, 2'b00};
-                            if (exp_use_map && exp_all_nodes_hot && exp_nnodes <= 5'd15) begin
-                                qspi_cmd_words <= {exp_nnodes[3:0], 1'b0};
-                            end else begin
-                                qspi_cmd_words <= 5'd0;
-                            end
+                            qspi_cmd_waddr <= {4'd0, exp_woff};
+                            qspi_cmd_words <= 5'd0;
                             q_active       <= 1'b1;
                             exp_phase      <= 3'd0;
-                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 20'd1;
+                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 14'd1;
                         end
                     end else begin
-                        if (qspi_rdata_valid) begin : ref_root_rx
-                            reg [23:0] rp;
-                            rp = reloc_qspi_port;
-                            if (exp_phase == 3'd0) begin
-                                pb <= rp; // exp_root
-                                if (exp_use_map && exp_all_nodes_hot && exp_nnodes != 5'd0 && exp_nnodes <= 5'd15) begin
-                                    exp_phase <= 3'd1;
-                                end else begin
-                                    exp_phase <= 3'd3;
-                                end
-                            end else if (exp_phase == 3'd1) begin
-                                buf_a0    <= rp;
-                                exp_phase <= 3'd2;
-                            end else if (exp_phase == 3'd2) begin
-                                hn_wr_en     <= 1'b1;
-                                hn_wr_addr   <= cur_dst_nmap[HN_AW-1:0];
-                                rf_wdata     <= {rp, buf_a0};
-                                exp_node_idx <= exp_node_idx + 5'd1;
-                                exp_phase    <= 3'd1;
-                            end
+                        if (qspi_rdata_valid) begin
+                            pb <= reloc_qspi_port; // exp_root
                         end
                         if (!qspi_busy && !qspi_cmd_valid && !qspi_rdata_valid) begin
                             q_active <= 1'b0;
-                            if (exp_nnodes == 5'd0 || (exp_use_map && exp_all_nodes_hot && exp_nnodes <= 5'd15)) begin
+                            exp_woff <= exp_woff + 14'd1;
+                            if (exp_nnodes == 5'd0) begin
                                 kind         <= K_DIRECT;
                                 cur_la       <= pb;
                                 cur_lb       <= pa;
@@ -1680,11 +1292,11 @@ module inet_core #(
                             qspi_cmd_valid <= 1'b1;
                             qspi_cmd_dev   <= 2'd0;
                             qspi_cmd_write <= 1'b0;
-                            qspi_cmd_addr  <= {4'd0, exp_woff + 18'd1 + {12'd0, exp_node_idx, 1'b0}, 2'b00};
+                            qspi_cmd_waddr <= {4'd0, exp_woff};
                             qspi_cmd_words <= 5'd1;
                             exp_phase      <= 3'd0;
                             q_active       <= 1'b1;
-                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 20'd1;
+                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 14'd1;
                         end
                     end else begin
                         if (qspi_rdata_valid) begin : cold_rn
@@ -1693,25 +1305,8 @@ module inet_core #(
                         end
                         if (!qspi_busy && !qspi_cmd_valid && !qspi_rdata_valid) begin
                             q_active <= 1'b0;
-                            if (exp_use_map && cur_dst_nmap[RMAP_IW]) begin
-                                hn_wr_en   <= 1'b1;
-                                hn_wr_addr <= cur_dst_nmap[HN_AW-1:0];
-                                rf_wdata   <= {buf_a1, buf_a0};
-                                if (exp_node_idx + 5'd1 >= exp_nnodes) begin
-                                    kind         <= K_DIRECT;
-                                    cur_la       <= pb;
-                                    cur_lb       <= pa;
-                                    chain_active <= 1'b0;
-                                    lnk_idx      <= 3'd0;
-                                    lnk_cnt      <= 3'd1;
-                                    after_link   <= (exp_nredex == 4'd0) ? S_IDLE : S_REF_REDEX;
-                                    state        <= S_LINK;
-                                end else begin
-                                    exp_node_idx <= exp_node_idx + 5'd1;
-                                end
-                            end else begin
-                                state <= S_REF_NODE_WR;
-                            end
+                            exp_woff <= exp_woff + 14'd2;
+                            state    <= S_REF_NODE_WR;
                         end
                     end
                 end
@@ -1719,18 +1314,17 @@ module inet_core #(
                 S_REF_NODE_WR: begin
                     if (!q_active) begin
                         if (!qspi_busy && qspi_cmd_ready) begin : wr_pn
-                            reg [14:0] dst_nid;
-                            dst_nid = exp_use_map ? (exp_base_nid + {{(15-RMAP_IW){1'b0}}, cur_dst_nmap[RMAP_IW-1:0]})
-                                                  : (exp_base_nid + {10'd0, exp_node_idx});
+                            reg [11:0] dst_nid;
+                            dst_nid = exp_base_nid + {7'd0, exp_node_idx};
                             qspi_cmd_valid   <= 1'b1;
                             qspi_cmd_dev     <= 2'd1;
                             qspi_cmd_write   <= 1'b1;
-                            qspi_cmd_addr    <= {6'd0, dst_nid, 3'b000};
+                            qspi_cmd_waddr   <= {5'd0, dst_nid, 1'b0};
                             qspi_cmd_words   <= 5'd1;
                             qspi_wdata_valid <= 1'b1;
                             wr_phase         <= 1'b0;
                             q_active         <= 1'b1;
-                            qspi_txn_cnt_r   <= qspi_txn_cnt_r + 20'd1;
+                            qspi_txn_cnt_r   <= qspi_txn_cnt_r + 14'd1;
                         end
                     end else begin
                         if (qspi_wdata_valid && qspi_wdata_ready) begin
@@ -1765,13 +1359,11 @@ module inet_core #(
                             qspi_cmd_valid <= 1'b1;
                             qspi_cmd_dev   <= 2'd0;
                             qspi_cmd_write <= 1'b0;
-                            qspi_cmd_addr  <= {4'd0, exp_woff + 18'd1 +
-                                               {12'd0, exp_nnodes, 1'b0} +
-                                               {13'd0, exp_redex_idx, 1'b0}, 2'b00};
+                            qspi_cmd_waddr <= {4'd0, exp_woff};
                             qspi_cmd_words <= (rem_r >= 4'd2) ? 5'd3 : 5'd1;
                             exp_phase      <= 3'd0;
                             q_active       <= 1'b1;
-                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 20'd1;
+                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 14'd1;
                         end
                     end else begin
                         if (qspi_rdata_valid) begin : redex_rx
@@ -1792,6 +1384,7 @@ module inet_core #(
                             lnk_idx       <= 3'd0;
                             lnk_cnt       <= {1'b0, batch[1:0]};
                             exp_redex_idx <= exp_redex_idx + batch;
+                            exp_woff      <= exp_woff + {11'd0, batch[1:0], 1'b0};
                             after_link    <= (exp_redex_idx + batch >= exp_nredex) ? S_IDLE : S_REF_REDEX;
                             state         <= S_LINK;
                         end
@@ -1805,7 +1398,7 @@ module inet_core #(
                             qspi_cmd_valid   <= 1'b1;
                             qspi_cmd_dev     <= 2'd2;
                             qspi_cmd_write   <= 1'b1;
-                            qspi_cmd_addr    <= {9'd0, spill_cnt, 3'b000};
+                            qspi_cmd_waddr   <= {7'd0, spill_cnt, 1'b0};
                             qspi_cmd_words   <= 5'd1;
                             buf_b0           <= dq_rd_data[23:0];
                             buf_a0           <= dq_rd_data[47:24];
@@ -1813,7 +1406,7 @@ module inet_core #(
                             spill_pop0       = 1'b1;
                             wr_phase         <= 1'b0;
                             q_active         <= 1'b1;
-                            qspi_txn_cnt_r   <= qspi_txn_cnt_r + 20'd1;
+                            qspi_txn_cnt_r   <= qspi_txn_cnt_r + 14'd1;
                         end
                     end else begin
                         if (qspi_wdata_valid && qspi_wdata_ready) begin
@@ -1822,8 +1415,8 @@ module inet_core #(
                         end
                         if (!qspi_busy && !qspi_cmd_valid) begin
                             q_active        <= 1'b0;
-                            spill_cnt       <= spill_cnt + 12'd1;
-                            psram_spill_cnt <= psram_spill_cnt + 16'd1;
+                            spill_cnt       <= spill_cnt + 10'd1;
+                            psram_spill_cnt <= psram_spill_cnt + 10'd1;
                             state           <= after_spill;
                         end
                     end
@@ -1835,11 +1428,11 @@ module inet_core #(
                             qspi_cmd_valid <= 1'b1;
                             qspi_cmd_dev   <= 2'd2;
                             qspi_cmd_write <= 1'b0;
-                            qspi_cmd_addr  <= {9'd0, spill_cnt - 12'd1, 3'b000};
+                            qspi_cmd_waddr <= {7'd0, spill_cnt - 10'd1, 1'b0};
                             qspi_cmd_words <= 5'd1;
                             exp_phase      <= 3'd0;
                             q_active       <= 1'b1;
-                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 20'd1;
+                            qspi_txn_cnt_r <= qspi_txn_cnt_r + 14'd1;
                         end
                     end else begin
                         if (qspi_rdata_valid) begin
@@ -1848,7 +1441,7 @@ module inet_core #(
                         end
                         if (!qspi_busy && !qspi_cmd_valid && !qspi_rdata_valid) begin
                             q_active  <= 1'b0;
-                            spill_cnt <= spill_cnt - 12'd1;
+                            spill_cnt <= spill_cnt - 10'd1;
                             push_en   = 1'b1;
                             push_tile = {TILE_W{1'b0}};
                             push_a    = buf_a0;
@@ -1861,45 +1454,19 @@ module inet_core #(
                 default: state <= S_IDLE;
             endcase
 
-            // Unified Chase-Lev deque updates via single-port latch RF
+            // Unified 1-entry/tile Chase-Lev deque updates
             begin : dq_upd
-                reg [1:0] nh [0:N_TILES-1];
-                reg [1:0] nt [0:N_TILES-1];
-                reg [2:0] nc [0:N_TILES-1];
-                integer dj;
+                reg [N_TILES-1:0] nv;
+                nv = dq_valid;
 
-                for (dj = 0; dj < N_TILES; dj = dj + 1) begin
-                    nh[dj] = dq_head[dj];
-                    nt[dj] = dq_tail[dj];
-                    nc[dj] = dq_cnt[dj];
-                end
-
-                if (pop_en) begin
-                    nt[pop_tile] = nt[pop_tile] - 2'd1;
-                    nc[pop_tile] = nc[pop_tile] - 3'd1;
-                end
-                if (steal_en) begin
-                    nh[pop_tile] = nh[pop_tile] + 2'd1;
-                    nc[pop_tile] = nc[pop_tile] - 3'd1;
-                end
-                if (spill_pop0) begin
-                    nh[0] = nh[0] + 2'd1;
-                    nc[0] = nc[0] - 3'd1;
-                end
-
+                if (pop_en || steal_en) nv[pop_tile] = 1'b0;
+                if (spill_pop0)         nv[0]        = 1'b0;
                 if (push_en) begin
-                    dq_wr_en   <= 1'b1;
-                    dq_wr_addr <= {push_tile, nt[push_tile]};
-                    rf_wdata   <= {push_b, push_a};
-                    nt[push_tile] = nt[push_tile] + 2'd1;
-                    nc[push_tile] = nc[push_tile] + 3'd1;
+                    dq_mem[push_tile] <= {push_b, push_a};
+                    nv[push_tile]      = 1'b1;
                 end
 
-                for (dj = 0; dj < N_TILES; dj = dj + 1) begin
-                    dq_head[dj] <= nh[dj];
-                    dq_tail[dj] <= nt[dj];
-                    dq_cnt[dj]  <= nc[dj];
-                end
+                dq_valid <= nv;
             end
         end
     end

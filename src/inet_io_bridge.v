@@ -23,10 +23,10 @@ module inet_io_bridge (
     input  wire [23:0] io_req_cont,
 
     // Completed active pair: io_out_a ~ io_out_b
-    output reg         io_out_valid,
+    output wire        io_out_valid,
     input  wire        io_out_ready,
-    output reg  [23:0] io_out_a,
-    output reg  [23:0] io_out_b,
+    output wire [23:0] io_out_a,
+    output wire [23:0] io_out_b,
 
     // SWD Region 0x7 MMIO port
     input  wire        dbg_mmio_valid,
@@ -386,8 +386,11 @@ module inet_io_bridge (
     wire [23:0] sel_cont = sel_is_sc ? sc_act_cont : fast_cont;
     wire [15:0] sel_res16 = sel_is_sc ? sercom_res : fast_res;
 
-    assign io_busy = sc_act_valid | sc_q_valid | sercom_done_valid | fast_slot_busy |
-                     io_out_valid | dbg_active;
+    assign io_out_valid = sel_found;
+    assign io_out_a     = sel_cont;
+    assign io_out_b     = {TAG_NUM, 4'h0, sel_res16};
+
+    assign io_busy = sc_act_valid | sc_q_valid | sercom_done_valid | fast_slot_busy | dbg_active;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -432,9 +435,6 @@ module inet_io_bridge (
 
             status_led     <= 1'b0;
             rr_bit         <= 1'b0;
-            io_out_valid   <= 1'b0;
-            io_out_a       <= 24'd0;
-            io_out_b       <= 24'd0;
         end else begin
             timer_req_valid <= 1'b0;
             ppi_req_valid   <= 1'b0;
@@ -474,6 +474,19 @@ module inet_io_bridge (
                             fast_done <= 1'b1;
                         end
                     end
+                end else if (fast_wait_dev == DEV_SYS) begin : sys_cap
+                    reg [15:0] sys16;
+                    case (sub_op)
+                        SYS_NOP,
+                        SYS_STATUS_LED: sys16 = {8'd0, sub_data};
+                        SYS_CYCLE_LO:   sys16 = cycle_cnt[15:0];
+                        SYS_CYCLE_HI:   sys16 = cycle_cnt[31:16];
+                        SYS_GPIO_RD:    sys16 = {15'd0, ext_irq};
+                        default:        sys16 = 16'hFF00;
+                    endcase
+                    fast_wait_sync <= 1'b0;
+                    fast_res       <= sys16;
+                    fast_done      <= 1'b1;
                 end else begin : sync_cap
                     reg [15:0] r16;
                     case (fast_wait_dev)
@@ -579,20 +592,10 @@ module inet_io_bridge (
                 end else if (fast_sel) begin
                     fast_slot_busy <= 1'b1;
                     fast_cont      <= io_req_cont;
-                    if (io_req_dev == DEV_SYS) begin
-                        fast_done <= 1'b1;
-                        case (req_op)
-                            SYS_NOP:      fast_res <= {8'd0, req_data};
-                            SYS_CYCLE_LO: fast_res <= cycle_cnt[15:0];
-                            SYS_CYCLE_HI: fast_res <= cycle_cnt[31:16];
-                            SYS_GPIO_RD:  fast_res <= {15'd0, ext_irq};
-                            SYS_STATUS_LED: begin
-                                status_led <= req_data[0];
-                                fast_res   <= {8'd0, req_data};
-                            end
-                            default: fast_res <= 16'hFF00;
-                        endcase
-                    end else if (io_req_dev <= DEV_XBAR) begin
+                    if (io_req_dev <= DEV_XBAR) begin
+                        if (io_req_dev == DEV_SYS && req_op == SYS_STATUS_LED) begin
+                            status_led <= req_data[0];
+                        end
                         fast_wait_sync <= 1'b1;
                         fast_wait_dev  <= io_req_dev;
                         fast_is_dbg    <= 1'b0;
@@ -614,16 +617,9 @@ module inet_io_bridge (
                 end
             end
 
-            // Completion output register + 2-way toggle
-            if (io_out_valid && io_out_ready) begin
-                io_out_valid <= 1'b0;
-            end
-
-            if (sel_found && (!io_out_valid || io_out_ready)) begin
-                io_out_valid <= 1'b1;
-                io_out_a     <= sel_cont;
-                io_out_b     <= {TAG_NUM, 4'h0, sel_res16};
-                rr_bit       <= ~sel_is_sc;
+            // Clear completed output once accepted
+            if (sel_found && io_out_ready) begin
+                rr_bit <= ~sel_is_sc;
                 if (sel_is_sc) sercom_done_valid <= 1'b0;
                 else begin
                     fast_slot_busy <= 1'b0;

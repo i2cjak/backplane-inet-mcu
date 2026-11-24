@@ -27,7 +27,7 @@ module inet_sercom (
 
     output reg        resp_valid,
     input  wire       resp_ready,
-    output reg  [7:0] resp_status,
+    output wire [7:0] resp_status,
     output reg  [7:0] resp_data,
 
     // PPI & DMA integration
@@ -115,10 +115,10 @@ module inet_sercom (
     reg [3:0]  bit_cnt;
 
     // Saved per-protocol divider shadows + shared tick counter
-    reg [11:0] uart_div;
+    reg [7:0]  uart_div;
     reg [7:0]  spi_div;
     reg [7:0]  i2c_div;
-    reg [11:0] tick_cnt;
+    reg [7:0]  tick_cnt;
 
     // Shared TX/RX shift registers & buffers
     reg [9:0]  shift_tx;
@@ -126,18 +126,17 @@ module inet_sercom (
     reg [7:0]  rx_buf;
     reg [7:0]  pending_tx;
 
-    // Shared 2-byte FIFO (for PPI task_kick & DMA TX buffering)
-    reg [7:0]  fifo_mem [0:1];
-    reg        fifo_rd;
-    reg        fifo_wr;
-    reg [1:0]  fifo_cnt;
+    // Shared 1-byte FIFO (for PPI task_kick & DMA TX buffering)
+    reg [7:0]  fifo_buf;
+    reg        fifo_full;
     reg        dma_auto_drain;
+    reg [3:0]  resp_status_r;
 
     // UART-specific control/RX sampler
     reg        tx_busy;
     reg [1:0]  rx_sync;
     reg [1:0]  rx_state;
-    reg [11:0] rx_clk_cnt;
+    reg [7:0]  rx_clk_cnt;
     reg [2:0]  rx_bit_cnt;
     reg        rx_valid;
     reg        dma_rx_pend;
@@ -167,9 +166,9 @@ module inet_sercom (
 
     wire scl_stretched = (mode == MODE_I2C) && (state >= ST_I2C_START) && (!scl_low_r) && (!scl_s);
 
-    wire [7:0] uart_status = {4'b0000, rx_overrun, framing_err, tx_busy, rx_valid};
-    wire [7:0] spi_status  = {6'b000000, cs_n_r, (state == ST_SPI_XFER)};
-    wire [7:0] i2c_status  = {5'b00000, bus_busy, last_nack, ~last_nack};
+    wire [3:0] uart_status = {rx_overrun, framing_err, tx_busy, rx_valid};
+    wire [3:0] spi_status  = {2'b00, cs_n_r, (state == ST_SPI_XFER)};
+    wire [3:0] i2c_status  = {1'b0, bus_busy, last_nack, ~last_nack};
 
     wire mode_switch_blocked = req_mode_auto && (req_mode != mode) && tx_busy;
 
@@ -180,10 +179,11 @@ module inet_sercom (
     assign spi_cs_n          = cs_n_r;
     assign i2c_scl_drive_low = scl_low_r;
     assign i2c_sda_drive_low = sda_low_r;
+    assign resp_status       = {4'd0, resp_status_r};
 
     assign req_ready = (state == ST_IDLE) && !resp_valid && !mode_switch_blocked;
 
-    assign dma_tx_ready = (fifo_cnt < 2'd2);
+    assign dma_tx_ready = !fifo_full;
     assign dma_rx_valid = (mode == MODE_UART) ? rx_valid : dma_rx_pend;
     assign dma_rx_data  = rx_buf;
 
@@ -193,25 +193,22 @@ module inet_sercom (
             state       <= ST_IDLE;
             phase       <= 2'd0;
             bit_cnt     <= 4'd0;
-            uart_div    <= 12'd207; // 24 MHz / 208 = 115,385 baud
+            uart_div    <= 8'd207; // 24 MHz / 208 = 115,385 baud
             spi_div     <= 8'd3;
-            i2c_div     <= 8'd59;   // 24 MHz / (4 * 60) = 100 kHz
-            tick_cnt    <= 12'd0;
+            i2c_div     <= 8'd59;  // 24 MHz / (4 * 60) = 100 kHz
+            tick_cnt    <= 8'd0;
             shift_tx    <= 10'h3FF;
             shift_rx    <= 8'd0;
             rx_buf      <= 8'd0;
             pending_tx  <= 8'd0;
-            fifo_mem[0] <= 8'd0;
-            fifo_mem[1] <= 8'd0;
-            fifo_rd        <= 1'b0;
-            fifo_wr        <= 1'b0;
-            fifo_cnt       <= 2'd0;
+            fifo_buf       <= 8'd0;
+            fifo_full      <= 1'b0;
             dma_auto_drain <= 1'b0;
 
             tx_busy     <= 1'b0;
             rx_sync     <= 2'b11;
             rx_state    <= RX_IDLE;
-            rx_clk_cnt  <= 12'd0;
+            rx_clk_cnt  <= 8'd0;
             rx_bit_cnt  <= 3'd0;
             rx_valid    <= 1'b0;
             dma_rx_pend <= 1'b0;
@@ -233,11 +230,11 @@ module inet_sercom (
             last_nack   <= 1'b0;
             bus_busy    <= 1'b0;
 
-            resp_valid  <= 1'b0;
-            resp_status <= 8'd0;
-            resp_data   <= 8'd0;
-            evt_done    <= 1'b0;
-            evt_rx      <= 1'b0;
+            resp_valid    <= 1'b0;
+            resp_status_r <= 4'd0;
+            resp_data     <= 8'd0;
+            evt_done      <= 1'b0;
+            evt_rx        <= 1'b0;
         end else begin : main_blk
             reg rx_consumed;
             reg kick_pop;
@@ -274,7 +271,7 @@ module inet_sercom (
 
             // ---------------- Background UART TX engine ----------------
             if (tx_busy) begin
-                if (tick_cnt == 12'd0) begin
+                if (tick_cnt == 8'd0) begin
                     tick_cnt <= uart_div;
                     if (bit_cnt == 4'd0) begin
                         tx_busy  <= 1'b0;
@@ -284,7 +281,7 @@ module inet_sercom (
                         bit_cnt  <= bit_cnt - 4'd1;
                     end
                 end else begin
-                    tick_cnt <= tick_cnt - 12'd1;
+                    tick_cnt <= tick_cnt - 8'd1;
                 end
             end
 
@@ -295,22 +292,22 @@ module inet_sercom (
                         mode <= req_mode;
                     end
                     if (req_op == OP_SERCOM_MODE) begin
-                        mode        <= req_data[1:0];
-                        resp_valid  <= 1'b1;
-                        resp_status <= 8'd0;
-                        resp_data   <= {6'd0, req_data[1:0]};
+                        mode          <= req_data[1:0];
+                        resp_valid    <= 1'b1;
+                        resp_status_r <= 4'd0;
+                        resp_data     <= {6'd0, req_data[1:0]};
                     end else case (eff_mode)
                         MODE_UART: begin
                             case (req_op)
                                 U_TX: begin
                                     if (!tx_busy) begin
-                                        shift_tx    <= {1'b1, req_data, 1'b0};
-                                        tx_busy     <= 1'b1;
-                                        bit_cnt     <= 4'd9;
-                                        tick_cnt    <= uart_div;
-                                        resp_valid  <= 1'b1;
-                                        resp_status <= {4'b0000, rx_overrun, framing_err, 1'b1, rx_valid};
-                                        resp_data   <= req_data;
+                                        shift_tx      <= {1'b1, req_data, 1'b0};
+                                        tx_busy       <= 1'b1;
+                                        bit_cnt       <= 4'd9;
+                                        tick_cnt      <= uart_div;
+                                        resp_valid    <= 1'b1;
+                                        resp_status_r <= {rx_overrun, framing_err, 1'b1, rx_valid};
+                                        resp_data     <= req_data;
                                     end else begin
                                         pending_tx <= req_data;
                                         state      <= ST_WAIT_TX;
@@ -319,12 +316,12 @@ module inet_sercom (
                                 U_RX_BLOCK: begin
                                     if (rx_valid) begin
                                         rx_consumed = 1'b1;
-                                        rx_valid    <= 1'b0;
-                                        rx_overrun  <= 1'b0;
-                                        framing_err <= 1'b0;
-                                        resp_valid  <= 1'b1;
-                                        resp_status <= uart_status;
-                                        resp_data   <= rx_buf;
+                                        rx_valid      <= 1'b0;
+                                        rx_overrun    <= 1'b0;
+                                        framing_err   <= 1'b0;
+                                        resp_valid    <= 1'b1;
+                                        resp_status_r <= uart_status;
+                                        resp_data     <= rx_buf;
                                     end else begin
                                         state <= ST_WAIT_RX;
                                     end
@@ -336,49 +333,48 @@ module inet_sercom (
                                         rx_overrun  <= 1'b0;
                                         framing_err <= 1'b0;
                                     end
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= uart_status;
-                                    resp_data   <= rx_buf;
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= uart_status;
+                                    resp_data     <= rx_buf;
                                 end
                                 U_STATUS: begin
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= uart_status;
-                                    resp_data   <= rx_buf;
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= uart_status;
+                                    resp_data     <= rx_buf;
                                 end
                                 U_TX_WAIT: begin
                                     if (!tx_busy) begin
-                                        resp_valid  <= 1'b1;
-                                        resp_status <= uart_status;
-                                        resp_data   <= 8'd0;
+                                        resp_valid    <= 1'b1;
+                                        resp_status_r <= uart_status;
+                                        resp_data     <= 8'd0;
                                     end else begin
                                         state <= ST_WAIT_TXDONE;
                                     end
                                 end
                                 U_CFG_DIV_LO: begin
-                                    uart_div[7:0] <= req_data;
+                                    uart_div      <= req_data;
                                     resp_valid    <= 1'b1;
-                                    resp_status   <= uart_status;
+                                    resp_status_r <= uart_status;
                                     resp_data     <= req_data;
                                 end
                                 U_CFG_DIV_HI: begin
-                                    uart_div[11:8] <= req_data[3:0];
-                                    resp_valid     <= 1'b1;
-                                    resp_status    <= uart_status;
-                                    resp_data      <= {4'b0000, req_data[3:0]};
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= uart_status;
+                                    resp_data     <= {4'b0000, req_data[3:0]};
                                 end
                                 U_FIFO_PUSH: begin
-                                    if (fifo_cnt < 2'd2) begin
+                                    if (!fifo_full) begin
                                         dma_push = 1'b1;
                                         push_val = req_data;
                                     end
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= {6'd0, fifo_cnt};
-                                    resp_data   <= req_data;
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= {3'd0, fifo_full};
+                                    resp_data     <= req_data;
                                 end
                                 default: begin
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= uart_status;
-                                    resp_data   <= 8'd0;
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= uart_status;
+                                    resp_data     <= 8'd0;
                                 end
                             endcase
                         end
@@ -390,46 +386,46 @@ module inet_sercom (
                                     shift_rx <= 8'd0;
                                     bit_cnt  <= 4'd7;
                                     phase    <= 2'd0;
-                                    tick_cnt <= {4'd0, spi_div};
+                                    tick_cnt <= spi_div;
                                     sck_r    <= cpol;
                                     if (!cpha) mosi_r <= req_data[7];
                                     state    <= ST_SPI_XFER;
                                 end
                                 S_CS_LOW: begin
-                                    cs_n_r      <= 1'b0;
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= 8'h00;
-                                    resp_data   <= rx_buf;
+                                    cs_n_r        <= 1'b0;
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= 4'h0;
+                                    resp_data     <= rx_buf;
                                 end
                                 S_CS_HIGH: begin
-                                    cs_n_r      <= 1'b1;
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= 8'h02;
-                                    resp_data   <= rx_buf;
+                                    cs_n_r        <= 1'b1;
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= 4'h2;
+                                    resp_data     <= rx_buf;
                                 end
                                 S_STATUS: begin
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= spi_status;
-                                    resp_data   <= rx_buf;
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= spi_status;
+                                    resp_data     <= rx_buf;
                                 end
                                 S_CFG_DIV: begin
-                                    spi_div     <= req_data;
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= spi_status;
-                                    resp_data   <= req_data;
+                                    spi_div       <= req_data;
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= spi_status;
+                                    resp_data     <= req_data;
                                 end
                                 S_CFG_MODE: begin
-                                    cpol        <= req_data[1];
-                                    cpha        <= req_data[0];
-                                    sck_r       <= req_data[1];
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= spi_status;
-                                    resp_data   <= {6'b000000, req_data[1:0]};
+                                    cpol          <= req_data[1];
+                                    cpha          <= req_data[0];
+                                    sck_r         <= req_data[1];
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= spi_status;
+                                    resp_data     <= {6'b000000, req_data[1:0]};
                                 end
                                 default: begin
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= spi_status;
-                                    resp_data   <= rx_buf;
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= spi_status;
+                                    resp_data     <= rx_buf;
                                 end
                             endcase
                         end
@@ -439,13 +435,13 @@ module inet_sercom (
                                 I_START: begin
                                     state     <= ST_I2C_START;
                                     phase     <= 2'd0;
-                                    tick_cnt  <= {4'd0, i2c_div};
+                                    tick_cnt  <= i2c_div;
                                     sda_low_r <= 1'b0;
                                 end
                                 I_STOP: begin
                                     state     <= ST_I2C_STOP;
                                     phase     <= 2'd0;
-                                    tick_cnt  <= {4'd0, i2c_div};
+                                    tick_cnt  <= i2c_div;
                                     sda_low_r <= 1'b1;
                                 end
                                 I_WRITE_BYTE: begin
@@ -453,7 +449,7 @@ module inet_sercom (
                                     i2c_is_read <= 1'b0;
                                     phase       <= 2'd0;
                                     bit_cnt     <= 4'd0;
-                                    tick_cnt    <= {4'd0, i2c_div};
+                                    tick_cnt    <= i2c_div;
                                     shift_tx    <= {3'd0, req_data[6:0]};
                                     sda_low_r   <= ~req_data[7];
                                 end
@@ -463,42 +459,42 @@ module inet_sercom (
                                     i2c_is_read <= 1'b1;
                                     phase       <= 2'd0;
                                     bit_cnt     <= 4'd0;
-                                    tick_cnt    <= {4'd0, i2c_div};
+                                    tick_cnt    <= i2c_div;
                                     shift_rx    <= 8'd0;
                                     send_ack_n  <= (req_op == I_READ_NACK);
                                     sda_low_r   <= 1'b0;
                                 end
                                 I_STATUS: begin
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= i2c_status;
-                                    resp_data   <= rx_buf;
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= i2c_status;
+                                    resp_data     <= rx_buf;
                                 end
                                 I_CFG_DIV: begin
-                                    i2c_div     <= (req_data == 8'd0) ? 8'd1 : req_data;
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= i2c_status;
-                                    resp_data   <= (req_data == 8'd0) ? 8'd1 : req_data;
+                                    i2c_div       <= (req_data == 8'd0) ? 8'd1 : req_data;
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= i2c_status;
+                                    resp_data     <= (req_data == 8'd0) ? 8'd1 : req_data;
                                 end
                                 default: begin
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= i2c_status;
-                                    resp_data   <= rx_buf;
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= i2c_status;
+                                    resp_data     <= rx_buf;
                                 end
                             endcase
                         end
 
                         default: begin
-                            resp_valid  <= 1'b1;
-                            resp_status <= 8'd0;
-                            resp_data   <= 8'd0;
+                            resp_valid    <= 1'b1;
+                            resp_status_r <= 4'd0;
+                            resp_data     <= 8'd0;
                         end
                     endcase
-                end else if ((task_kick || (dma_auto_drain && fifo_cnt != 2'd0) ||
-                              (dma_tx_valid && fifo_cnt == 2'd0 && !req_valid)) &&
-                             !tx_busy && (fifo_cnt != 2'd0 || dma_tx_valid)) begin : auto_kick
+                end else if ((task_kick || (dma_auto_drain && fifo_full) ||
+                              (dma_tx_valid && !fifo_full && !req_valid)) &&
+                             !tx_busy && (fifo_full || dma_tx_valid)) begin : auto_kick
                     reg [7:0] tx_b;
-                    if (fifo_cnt != 2'd0) begin
-                        tx_b     = fifo_mem[fifo_rd];
+                    if (fifo_full) begin
+                        tx_b     = fifo_buf;
                         kick_pop = 1'b1;
                     end else begin
                         tx_b = dma_tx_data;
@@ -513,7 +509,7 @@ module inet_sercom (
                         shift_rx <= 8'd0;
                         bit_cnt  <= 4'd7;
                         phase    <= 2'd0;
-                        tick_cnt <= {4'd0, spi_div};
+                        tick_cnt <= spi_div;
                         sck_r    <= cpol;
                         if (!cpha) mosi_r <= tx_b[7];
                         state    <= ST_SPI_XFER;
@@ -522,7 +518,7 @@ module inet_sercom (
                         i2c_is_read <= 1'b0;
                         phase       <= 2'd0;
                         bit_cnt     <= 4'd0;
-                        tick_cnt    <= {4'd0, i2c_div};
+                        tick_cnt    <= i2c_div;
                         shift_tx    <= {3'd0, tx_b[6:0]};
                         sda_low_r   <= ~tx_b[7];
                     end
@@ -531,42 +527,42 @@ module inet_sercom (
                 case (state)
                     ST_WAIT_TX: begin
                         if (!tx_busy) begin
-                            shift_tx    <= {1'b1, pending_tx, 1'b0};
-                            tx_busy     <= 1'b1;
-                            bit_cnt     <= 4'd9;
-                            tick_cnt    <= uart_div;
-                            resp_valid  <= 1'b1;
-                            resp_status <= {4'b0000, rx_overrun, framing_err, 1'b1, rx_valid};
-                            resp_data   <= pending_tx;
-                            state       <= ST_IDLE;
+                            shift_tx      <= {1'b1, pending_tx, 1'b0};
+                            tx_busy       <= 1'b1;
+                            bit_cnt       <= 4'd9;
+                            tick_cnt      <= uart_div;
+                            resp_valid    <= 1'b1;
+                            resp_status_r <= {rx_overrun, framing_err, 1'b1, rx_valid};
+                            resp_data     <= pending_tx;
+                            state         <= ST_IDLE;
                         end
                     end
 
                     ST_WAIT_RX: begin
                         if (rx_valid) begin
                             rx_consumed = 1'b1;
-                            rx_valid    <= 1'b0;
-                            rx_overrun  <= 1'b0;
-                            framing_err <= 1'b0;
-                            resp_valid  <= 1'b1;
-                            resp_status <= uart_status;
-                            resp_data   <= rx_buf;
-                            state       <= ST_IDLE;
+                            rx_valid      <= 1'b0;
+                            rx_overrun    <= 1'b0;
+                            framing_err   <= 1'b0;
+                            resp_valid    <= 1'b1;
+                            resp_status_r <= uart_status;
+                            resp_data     <= rx_buf;
+                            state         <= ST_IDLE;
                         end
                     end
 
                     ST_WAIT_TXDONE: begin
                         if (!tx_busy) begin
-                            resp_valid  <= 1'b1;
-                            resp_status <= uart_status;
-                            resp_data   <= 8'd0;
-                            state       <= ST_IDLE;
+                            resp_valid    <= 1'b1;
+                            resp_status_r <= uart_status;
+                            resp_data     <= 8'd0;
+                            state         <= ST_IDLE;
                         end
                     end
 
                     ST_SPI_XFER: begin
-                        if (tick_cnt == 12'd0) begin
-                            tick_cnt <= {4'd0, spi_div};
+                        if (tick_cnt == 8'd0) begin
+                            tick_cnt <= spi_div;
                             if (!phase[0]) begin
                                 sck_r    <= ~cpol;
                                 phase[0] <= 1'b1;
@@ -582,14 +578,14 @@ module inet_sercom (
                                 phase[0] <= 1'b0;
                                 if (!cpha) begin
                                     if (bit_cnt == 4'd0) begin
-                                        state       <= ST_IDLE;
-                                        rx_buf      <= shift_rx;
-                                        dma_rx_pend <= 1'b1;
-                                        resp_valid  <= 1'b1;
-                                        resp_status <= {6'b000000, cs_n_r, 1'b0};
-                                        resp_data   <= shift_rx;
-                                        evt_done    <= 1'b1;
-                                        evt_rx      <= 1'b1;
+                                        state         <= ST_IDLE;
+                                        rx_buf        <= shift_rx;
+                                        dma_rx_pend   <= 1'b1;
+                                        resp_valid    <= 1'b1;
+                                        resp_status_r <= {2'b00, cs_n_r, 1'b0};
+                                        resp_data     <= shift_rx;
+                                        evt_done      <= 1'b1;
+                                        evt_rx        <= 1'b1;
                                     end else begin
                                         mosi_r  <= shift_tx[7];
                                         bit_cnt <= bit_cnt - 4'd1;
@@ -599,66 +595,66 @@ module inet_sercom (
                                     next_rx = {shift_rx[6:0], spi_miso};
                                     shift_rx <= next_rx;
                                     if (bit_cnt == 4'd0) begin
-                                        state       <= ST_IDLE;
-                                        rx_buf      <= next_rx;
-                                        dma_rx_pend <= 1'b1;
-                                        resp_valid  <= 1'b1;
-                                        resp_status <= {6'b000000, cs_n_r, 1'b0};
-                                        resp_data   <= next_rx;
-                                        evt_done    <= 1'b1;
-                                        evt_rx      <= 1'b1;
+                                        state         <= ST_IDLE;
+                                        rx_buf        <= next_rx;
+                                        dma_rx_pend   <= 1'b1;
+                                        resp_valid    <= 1'b1;
+                                        resp_status_r <= {2'b00, cs_n_r, 1'b0};
+                                        resp_data     <= next_rx;
+                                        evt_done      <= 1'b1;
+                                        evt_rx        <= 1'b1;
                                     end else begin
                                         bit_cnt <= bit_cnt - 4'd1;
                                     end
                                 end
                             end
                         end else begin
-                            tick_cnt <= tick_cnt - 12'd1;
+                            tick_cnt <= tick_cnt - 8'd1;
                         end
                     end
 
                     ST_I2C_START: if (!scl_stretched) begin
-                        if (tick_cnt != 12'd0) tick_cnt <= tick_cnt - 12'd1;
+                        if (tick_cnt != 8'd0) tick_cnt <= tick_cnt - 8'd1;
                         else begin
-                            tick_cnt <= {4'd0, i2c_div};
+                            tick_cnt <= i2c_div;
                             case (phase)
                                 2'd0: begin scl_low_r <= 1'b0; phase <= 2'd1; end
                                 2'd1: begin sda_low_r <= 1'b1; bus_busy <= 1'b1; phase <= 2'd2; end
                                 2'd2: begin scl_low_r <= 1'b1; phase <= 2'd3; end
                                 2'd3: begin
-                                    state       <= ST_IDLE;
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= {5'b00000, 1'b1, last_nack, ~last_nack};
-                                    resp_data   <= rx_buf;
-                                    evt_done    <= 1'b1;
+                                    state         <= ST_IDLE;
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= {1'b0, 1'b1, last_nack, ~last_nack};
+                                    resp_data     <= rx_buf;
+                                    evt_done      <= 1'b1;
                                 end
                             endcase
                         end
                     end
 
                     ST_I2C_STOP: if (!scl_stretched) begin
-                        if (tick_cnt != 12'd0) tick_cnt <= tick_cnt - 12'd1;
+                        if (tick_cnt != 8'd0) tick_cnt <= tick_cnt - 8'd1;
                         else begin
-                            tick_cnt <= {4'd0, i2c_div};
+                            tick_cnt <= i2c_div;
                             case (phase)
                                 2'd0: begin scl_low_r <= 1'b0; phase <= 2'd1; end
                                 2'd1: begin sda_low_r <= 1'b0; bus_busy <= 1'b0; phase <= 2'd2; end
                                 2'd2: begin phase <= 2'd3; end
                                 2'd3: begin
-                                    state       <= ST_IDLE;
-                                    resp_valid  <= 1'b1;
-                                    resp_status <= {5'b00000, 1'b0, last_nack, ~last_nack};
-                                    resp_data   <= rx_buf;
-                                    evt_done    <= 1'b1;
+                                    state         <= ST_IDLE;
+                                    resp_valid    <= 1'b1;
+                                    resp_status_r <= {1'b0, 1'b0, last_nack, ~last_nack};
+                                    resp_data     <= rx_buf;
+                                    evt_done      <= 1'b1;
                                 end
                             endcase
                         end
                     end
 
                     ST_I2C_BYTE: if (!scl_stretched) begin
-                        if (tick_cnt != 12'd0) tick_cnt <= tick_cnt - 12'd1;
+                        if (tick_cnt != 8'd0) tick_cnt <= tick_cnt - 8'd1;
                         else begin
-                            tick_cnt <= {4'd0, i2c_div};
+                            tick_cnt <= i2c_div;
                             case (phase)
                                 2'd0: begin scl_low_r <= 1'b0; phase <= 2'd1; end
                                 2'd1: begin
@@ -674,16 +670,16 @@ module inet_sercom (
                                         state     <= ST_IDLE;
                                         evt_done  <= 1'b1;
                                         if (i2c_is_read) begin
-                                            rx_buf      <= shift_rx;
-                                            dma_rx_pend <= 1'b1;
-                                            resp_valid  <= 1'b1;
-                                            resp_status <= {5'b00000, bus_busy, send_ack_n, ~send_ack_n};
-                                            resp_data   <= shift_rx;
-                                            evt_rx      <= 1'b1;
+                                            rx_buf        <= shift_rx;
+                                            dma_rx_pend   <= 1'b1;
+                                            resp_valid    <= 1'b1;
+                                            resp_status_r <= {1'b0, bus_busy, send_ack_n, ~send_ack_n};
+                                            resp_data     <= shift_rx;
+                                            evt_rx        <= 1'b1;
                                         end else begin
-                                            resp_valid  <= 1'b1;
-                                            resp_status <= {5'b00000, bus_busy, last_nack, ~last_nack};
-                                            resp_data   <= rx_buf;
+                                            resp_valid    <= 1'b1;
+                                            resp_status_r <= {1'b0, bus_busy, last_nack, ~last_nack};
+                                            resp_data     <= rx_buf;
                                         end
                                     end else begin : i2c_next
                                         reg [3:0] next_bit;
@@ -707,28 +703,18 @@ module inet_sercom (
                 endcase
             end
 
-            // ---------------- Shared FIFO push/pop ----------------
+            // ---------------- Shared 1-byte FIFO push/pop ----------------
             if (dma_tx_valid && dma_tx_ready) begin
                 dma_auto_drain <= 1'b1;
-                if (!(state == ST_IDLE && !req_valid && !tx_busy && fifo_cnt == 2'd0)) begin
+                if (!(state == ST_IDLE && !req_valid && !tx_busy && !fifo_full)) begin
                     dma_push = 1'b1;
                     push_val = dma_tx_data;
                 end
-            end else if (fifo_cnt == 2'd0 && !tx_busy && state == ST_IDLE) begin
+            end else if (!fifo_full && !tx_busy && state == ST_IDLE) begin
                 dma_auto_drain <= 1'b0;
             end
-            if (dma_push && !kick_pop) begin
-                fifo_mem[fifo_wr] <= push_val;
-                fifo_wr  <= ~fifo_wr;
-                fifo_cnt <= fifo_cnt + 2'd1;
-            end else if (!dma_push && kick_pop) begin
-                fifo_rd  <= ~fifo_rd;
-                fifo_cnt <= fifo_cnt - 2'd1;
-            end else if (dma_push && kick_pop) begin
-                fifo_mem[fifo_wr] <= push_val;
-                fifo_wr  <= ~fifo_wr;
-                fifo_rd  <= ~fifo_rd;
-            end
+            if (dma_push) fifo_buf <= push_val;
+            fifo_full <= (fifo_full & ~kick_pop) | dma_push;
 
             // ---------------- UART RX Sampler (active in MODE_UART) ----------------
             if (mode == MODE_UART) begin
@@ -736,11 +722,11 @@ module inet_sercom (
                     RX_IDLE: begin
                         if (!rx_s) begin
                             rx_state   <= RX_START;
-                            rx_clk_cnt <= {1'b0, uart_div[11:1]};
+                            rx_clk_cnt <= {1'b0, uart_div[7:1]};
                         end
                     end
                     RX_START: begin
-                        if (rx_clk_cnt == 12'd0) begin
+                        if (rx_clk_cnt == 8'd0) begin
                             if (!rx_s) begin
                                 rx_state   <= RX_DATA;
                                 rx_clk_cnt <= uart_div;
@@ -749,21 +735,21 @@ module inet_sercom (
                                 rx_state <= RX_IDLE;
                             end
                         end else begin
-                            rx_clk_cnt <= rx_clk_cnt - 12'd1;
+                            rx_clk_cnt <= rx_clk_cnt - 8'd1;
                         end
                     end
                     RX_DATA: begin
-                        if (rx_clk_cnt == 12'd0) begin
+                        if (rx_clk_cnt == 8'd0) begin
                             shift_rx   <= {rx_s, shift_rx[7:1]};
                             rx_clk_cnt <= uart_div;
                             if (rx_bit_cnt == 3'd7) rx_state <= RX_STOP;
                             else                    rx_bit_cnt <= rx_bit_cnt + 3'd1;
                         end else begin
-                            rx_clk_cnt <= rx_clk_cnt - 12'd1;
+                            rx_clk_cnt <= rx_clk_cnt - 8'd1;
                         end
                     end
                     RX_STOP: begin
-                        if (rx_clk_cnt == 12'd0) begin
+                        if (rx_clk_cnt == 8'd0) begin
                             rx_state <= RX_IDLE;
                             if (!rx_s) framing_err <= 1'b1;
                             if (rx_valid && !rx_consumed) begin
@@ -775,7 +761,7 @@ module inet_sercom (
                                 evt_done <= 1'b1;
                             end
                         end else begin
-                            rx_clk_cnt <= rx_clk_cnt - 12'd1;
+                            rx_clk_cnt <= rx_clk_cnt - 8'd1;
                         end
                     end
                     default: rx_state <= RX_IDLE;

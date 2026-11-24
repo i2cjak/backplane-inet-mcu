@@ -25,6 +25,7 @@ module inet_latch_rf #(
     input  wire              we,
     input  wire [ADDR_W-1:0] waddr,
     input  wire [WIDTH-1:0]  wdata,
+    input  wire [WIDTH-1:0]  wdata_latch,
     input  wire [ADDR_W-1:0] raddr,
     output wire [WIDTH-1:0]  rdata
 );
@@ -62,7 +63,7 @@ module inet_latch_rf #(
         end
     endgenerate
 
-    wire [DEPTH-1:0] we_oh_q = eff_we ? ({{(DEPTH-1){1'b0}}, 1'b1} << eff_waddr) : {DEPTH{1'b0}};
+    (* keep = "true" *) wire [DEPTH-1:0] we_oh_q = eff_we ? ({{(DEPTH-1){1'b0}}, 1'b1} << eff_waddr) : {DEPTH{1'b0}};
     wire [DEPTH-1:0] gclk_n  = {DEPTH{clk}} | ~we_oh_q;
 
     reg [WIDTH-1:0] mem [0:DEPTH-1];
@@ -81,7 +82,7 @@ module inet_latch_rf #(
     always @(*) begin
         for (idx_i = 0; idx_i < DEPTH; idx_i = idx_i + 1) begin
             if (!gclk_n[idx_i]) begin
-                mem[idx_i] = eff_wdata;
+                mem[idx_i] = wdata_latch;
             end
         end
     end
@@ -91,6 +92,7 @@ module inet_latch_rf #(
         if (BYPASS != 0) begin : gen_bypass
             assign rdata = (eff_we && (raddr == eff_waddr)) ? eff_wdata : mem[raddr];
         end else begin : gen_nobypass
+            wire _unused_eff_wdata = &{1'b0, eff_wdata};
             assign rdata = mem[raddr];
         end
     endgenerate

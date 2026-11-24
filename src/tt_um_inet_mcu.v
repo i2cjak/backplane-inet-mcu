@@ -12,9 +12,9 @@
 `default_nettype none
 
 module tt_um_inet_mcu #(
-    parameter integer HOT_NODES       = 16,
-    parameter integer HOT_WIRES       = 16,
-    parameter integer REF_DIR_ENTRIES = 8,
+    parameter integer HOT_NODES       = 1,
+    parameter integer HOT_WIRES       = 1,
+    parameter integer REF_DIR_ENTRIES = 0,
     parameter integer N_TILES         = 2
 ) (
     input  wire [7:0] ui_in,    // Dedicated inputs

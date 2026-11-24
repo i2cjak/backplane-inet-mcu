@@ -44,7 +44,7 @@ module inet_swd (
     output reg         dbg_mem_req,
     output reg         dbg_mem_we,
     output reg  [23:0] dbg_mem_addr,
-    output reg  [31:0] dbg_mem_wdata,
+    output wire [31:0] dbg_mem_wdata,
     input  wire        dbg_mem_ready,
     input  wire [31:0] dbg_mem_rdata
 );
@@ -89,8 +89,11 @@ module inet_swd (
     reg        csyspwrupreq;
     reg        cdbgpwrupreq;
     reg        stickyerr;
-    reg [3:0]  ap_banksel;
+    reg [1:0]  ap_banksel;
     reg [31:0] ap_rdbuff;
+    reg        par_bit;
+
+    assign dbg_mem_wdata = data_shift;
 
     wire [31:0] dbg_ctrl_stat = {
         24'd0,
@@ -120,8 +123,9 @@ module inet_swd (
             csyspwrupreq    <= 1'b0;
             cdbgpwrupreq    <= 1'b0;
             stickyerr       <= 1'b0;
-            ap_banksel      <= 4'd0;
+            ap_banksel      <= 2'd0;
             ap_rdbuff       <= 32'd0;
+            par_bit         <= 1'b0;
 
             dbg_halt_req    <= 1'b0;
             dbg_step_pulse  <= 1'b0;
@@ -129,7 +133,6 @@ module inet_swd (
             dbg_mem_req     <= 1'b0;
             dbg_mem_we      <= 1'b0;
             dbg_mem_addr    <= 24'd0;
-            dbg_mem_wdata   <= 32'd0;
         end else begin
             swclk_sync      <= {swclk_sync[1:0], swclk_in};
             swdio_sync      <= {swdio_sync[0], swdio_in};
@@ -204,8 +207,7 @@ module inet_swd (
                                     if (stickyerr && !(ap_sel == 1'b0 && rw_sel == 1'b0 && a_sel == 2'd0)) begin
                                         ack_bits <= ACK_FAULT;
                                     end else if (dbg_mem_req &&
-                                                ((ap_sel == 1'b1 && a_sel == 2'd2) ||
-                                                 (ap_sel == 1'b0 && rw_sel == 1'b1 && a_sel == 2'd3))) begin
+                                                 !(ap_sel == 1'b0 && rw_sel == 1'b0 && a_sel == 2'd0)) begin
                                         ack_bits <= ACK_WAIT;
                                     end else begin
                                         ack_bits <= ACK_OK;
@@ -216,11 +218,11 @@ module inet_swd (
                                                     2'd1: data_shift <= {csyspwrupreq, csyspwrupreq,
                                                                          cdbgpwrupreq, cdbgpwrupreq,
                                                                          22'd0, stickyerr, 5'd0};
-                                                    2'd2: data_shift <= {24'd0, ap_banksel, 4'd0};
+                                                    2'd2: data_shift <= {26'd0, ap_banksel, 4'd0};
                                                     2'd3: data_shift <= ap_rdbuff;
                                                 endcase
                                             end else begin
-                                                if (ap_banksel == 4'd0) begin
+                                                if (ap_banksel == 2'd0) begin
                                                     case (a_sel)
                                                         2'd0: data_shift <= dbg_ctrl_stat;
                                                         2'd1: data_shift <= {8'd0, dbg_mem_addr};
@@ -232,7 +234,7 @@ module inet_swd (
                                                         end
                                                         2'd3: data_shift <= AP_IDR_VAL;
                                                     endcase
-                                                end else if (ap_banksel == 4'd1) begin
+                                                end else if (ap_banksel == 2'd1) begin
                                                     case (a_sel)
                                                         2'd0: data_shift <= cycle_cnt;
                                                         2'd1: data_shift <= redex_cnt;
@@ -260,6 +262,7 @@ module inet_swd (
                         end
 
                         ST_TRN_OUT: begin
+                            par_bit <= 1'b0;
                             bit_cnt <= 6'd0;
                             state   <= ST_WDATA;
                         end
@@ -267,10 +270,11 @@ module inet_swd (
                         ST_WDATA: begin
                             if (bit_cnt < 6'd32) begin
                                 data_shift <= {swdio_s, data_shift[31:1]};
+                                par_bit    <= par_bit ^ swdio_s;
                                 bit_cnt    <= bit_cnt + 6'd1;
                             end else begin
                                 // Parity bit check
-                                if (swdio_s != (^data_shift)) begin
+                                if (swdio_s != par_bit) begin
                                     stickyerr <= 1'b1;
                                 end else begin
                                     if (hdr_apndp == 1'b0) begin
@@ -286,11 +290,11 @@ module inet_swd (
                                                 cdbgpwrupreq <= data_shift[28];
                                             end
                                             2'd2: begin
-                                                ap_banksel <= data_shift[7:4];
+                                                ap_banksel <= (|data_shift[7:6]) ? 2'd2 : data_shift[5:4];
                                             end
                                             default: begin end
                                         endcase
-                                    end else if (ap_banksel == 4'd0) begin
+                                    end else if (ap_banksel == 2'd0) begin
                                         case (hdr_addr)
                                             2'd0: begin
                                                 dbg_halt_req    <= data_shift[0];
@@ -301,9 +305,8 @@ module inet_swd (
                                                 dbg_mem_addr <= data_shift[23:0];
                                             end
                                             2'd2: begin
-                                                dbg_mem_wdata <= data_shift;
-                                                dbg_mem_we    <= 1'b1;
-                                                dbg_mem_req   <= 1'b1;
+                                                dbg_mem_we  <= 1'b1;
+                                                dbg_mem_req <= 1'b1;
                                             end
                                             default: begin end
                                         endcase
@@ -335,9 +338,11 @@ module inet_swd (
                                 swdio_oe <= 1'b0;
                                 state    <= ST_TRN_END;
                             end else if (hdr_rnw) begin
-                                swdio_out <= data_shift[0];
-                                bit_cnt   <= 6'd0;
-                                state     <= ST_RDATA;
+                                swdio_out  <= data_shift[0];
+                                par_bit    <= data_shift[0];
+                                data_shift <= {1'b0, data_shift[31:1]};
+                                bit_cnt    <= 6'd0;
+                                state      <= ST_RDATA;
                             end else begin
                                 swdio_oe <= 1'b0;
                                 state    <= ST_TRN_OUT;
@@ -346,10 +351,12 @@ module inet_swd (
 
                         ST_RDATA: begin
                             if (bit_cnt < 6'd31) begin
-                                swdio_out <= data_shift[bit_cnt[4:0] + 5'd1];
-                                bit_cnt   <= bit_cnt + 6'd1;
+                                swdio_out  <= data_shift[0];
+                                par_bit    <= par_bit ^ data_shift[0];
+                                data_shift <= {1'b0, data_shift[31:1]};
+                                bit_cnt    <= bit_cnt + 6'd1;
                             end else begin
-                                swdio_out <= ^data_shift; // even parity
+                                swdio_out <= par_bit; // even parity
                                 state     <= ST_RPAR;
                             end
                         end
